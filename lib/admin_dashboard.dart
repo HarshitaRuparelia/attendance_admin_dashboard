@@ -178,27 +178,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
       for (var record in attendance) {
         final employee = employees.firstWhere(
-          (e) => e["uid"] == record["userId"],
+              (e) => e["uid"] == record["userId"],
           orElse: () => {"name": "Unknown"},
         );
 
         final punchInTime = (record["punchInTime"] as Timestamp?)?.toDate();
         final punchOutTime = (record["punchOutTime"] as Timestamp?)?.toDate();
-        final duration = (punchInTime != null && punchOutTime != null)
-            ? punchOutTime.difference(punchInTime)
-            : null;
 
         final exemptionStatus = record["exemptionStatus"] ?? "none";
 
-        // 🧮 Duration in minutes for easy Excel math
-        final totalMinutes = duration?.inMinutes ?? 0;
+        // Duration in minutes (if punchOut exists)
+        final totalMinutes = record['totalHours'] ?? 0;
 
-        // 🔹 Exempt status text as per your app logic
-        String exemptText = "Mark Exempt";
-        if (exemptionStatus == "requested") {
+        // Exempt status text
+        String exemptText;
+        if (punchInTime != null && punchOutTime == null) {
+          exemptText = "Not punched out yet";
+        } else if (exemptionStatus == "requested") {
           exemptText = "Exemption Requested";
         } else if (exemptionStatus == "approved") {
           exemptText = "Approved";
+        } else {
+          exemptText = "Mark Exempt";
         }
 
         sheet.appendRow([
@@ -211,16 +212,17 @@ class _AdminDashboardState extends State<AdminDashboard> {
           punchInTime != null
               ? DateFormat('dd MMM yyyy').format(punchInTime)
               : "-",
-          totalMinutes, // ✅ stored as number for Excel formulas
-          "-",
-          exemptText, // ✅ full exempt status
+          totalMinutes, // 0 if not punched out
+          "-", // leave status
+          exemptText,
           record["punchInAddress"] ?? "-",
           record["punchOutAddress"] ?? "-",
           record["punchInSelfieUrl"] ?? "-",
           record["punchOutSelfieUrl"] ?? "-",
-          "-", // holiday name not applicable here
+          "-", // holiday name
         ]);
       }
+
 
       // Leave rows
       for (var leave in leaves) {
@@ -534,11 +536,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                     final punchOutTime =
                                         (data["punchOutTime"] as Timestamp?)
                                             ?.toDate();
-                                    final duration =
+                                    /*final duration =
                                         (punchInTime != null &&
                                             punchOutTime != null)
                                         ? punchOutTime.difference(punchInTime)
-                                        : null;
+                                        : null;*/
 
                                     final exemptionStatus =
                                         data['exemptionStatus'] ?? "none";
@@ -546,25 +548,34 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                     String totalHoursText = "-";
 
                                     if (!isLeave &&
-                                        !isHoliday &&
-                                        duration != null) {
-                                      final hours = duration.inHours;
-                                      final minutes = duration.inMinutes
-                                          .remainder(60);
-
-                                      if (hours < 9 &&
-                                          exemptionStatus != "approved") {
-                                        isHalfDay = true;
-                                        totalHoursText =
-                                            "$hours h $minutes m (Half Day)";
-                                      } else {
-                                        totalHoursText = "$hours h $minutes m";
+                                        !isHoliday) {
+                                      if (punchOutTime == null) {
+                                        // ❗ User did NOT punch out
+                                        totalHoursText = "-";
                                       }
-                                    } else if (isLeave) {
-                                      totalHoursText = "0 h 0 m";
+                                      else {
+                                        // Use totalMinutes from DB
+                                        final totalMinutes = data['totalHours'] ??
+                                            0; // totalHours stored in minutes
+                                        final hours = totalMinutes ~/ 60;
+                                        final minutes = totalMinutes % 60;
+
+                                        if (hours < 9 &&
+                                            exemptionStatus != "approved") {
+                                          isHalfDay = true;
+                                          totalHoursText =
+                                          "$hours h ${minutes.toString().padLeft(2, '0')} m (Half Day)";
+                                        } else {
+                                          totalHoursText =
+                                          "$hours h ${minutes.toString().padLeft(2, '0')} m";
+                                        }
+                                      }
+                                      } else if (isLeave) {
+                                      totalHoursText = "0 h 00 m";
                                     } else if (isHoliday) {
                                       totalHoursText = "-";
                                     }
+
 
                                     final rowColor = isHoliday
                                         ? Colors.green[100]
@@ -686,16 +697,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                                 ),
                                         ),
                                         DataCell(
-                                          Text(
-                                            isLeave || isHoliday
-                                                ? "-"
-                                                : punchInTime != null
-                                                ? DateFormat(
-                                                    'hh:mm a',
-                                                  ).format(punchInTime)
-                                                : "-",
+                                          isLeave || isHoliday
+                                              ? const Text("-")
+                                              : Tooltip(
+                                            message: data['isLate'] == true ? "⚠️ Late Punch In" : "",
+                                            child: Text(
+                                              punchInTime != null
+                                                  ? DateFormat('hh:mm a').format(punchInTime)
+                                                  : "-",
+                                              style: TextStyle(
+                                                color: (data['isLate'] == true) ? Colors.red : Colors.black,
+                                                fontWeight: (data['isLate'] == true)
+                                                    ? FontWeight.bold
+                                                    : FontWeight.normal,
+                                              ),
+                                            ),
                                           ),
                                         ),
+
                                         DataCell(
                                           Text(
                                             isLeave || isHoliday
@@ -803,64 +822,45 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                           isLeave || isHoliday
                                               ? const Text("N/A")
                                               : StatefulBuilder(
-                                                  builder: (context, setInnerState) {
-                                                    final exemptionStatus =
-                                                        data['exemptionStatus'] ??
-                                                        "none";
+                                            builder: (context, setInnerState) {
+                                              final exemptionStatus = data['exemptionStatus'] ?? "none";
+                                              final punchOutTime = data["punchOutTime"] as Timestamp?;
 
-                                                    String buttonText =
-                                                        "Mark Exempt";
-                                                    Color buttonColor =
-                                                        Colors.grey;
+                                              String buttonText;
+                                              Color buttonColor;
 
-                                                    if (exemptionStatus ==
-                                                        "requested") {
-                                                      buttonText =
-                                                          "Exemption Requested";
-                                                      buttonColor =
-                                                          Colors.orangeAccent;
-                                                    } else if (exemptionStatus ==
-                                                        "approved") {
-                                                      buttonText = "Exempted ✅";
-                                                      buttonColor =
-                                                          Colors.green;
-                                                    }
+                                              if (punchOutTime == null) {
+                                                buttonText = "Not punched out yet";
+                                                buttonColor = Colors.redAccent;
+                                              } else if (exemptionStatus == "requested") {
+                                                buttonText = "Exemption Requested";
+                                                buttonColor = Colors.orangeAccent;
+                                              } else if (exemptionStatus == "approved") {
+                                                buttonText = "Exempted ✅";
+                                                buttonColor = Colors.green;
+                                              } else {
+                                                buttonText = "Mark Exempt";
+                                                buttonColor = Colors.grey;
+                                              }
 
-                                                    return ElevatedButton(
-                                                      onPressed:
-                                                          exemptionStatus ==
-                                                              "approved"
-                                                          ? null
-                                                          : () async {
-                                                              final docRef =
-                                                                  FirebaseFirestore
-                                                                      .instance
-                                                                      .collection(
-                                                                        "attendance",
-                                                                      )
-                                                                      .doc(
-                                                                        data["id"],
-                                                                      );
-                                                              await docRef.update({
-                                                                'exemptionStatus':
-                                                                    "approved",
-                                                              });
-                                                              setInnerState(
-                                                                () => data['exemptionStatus'] =
-                                                                    "approved",
-                                                              );
-                                                              setState(() {});
-                                                            },
-                                                      style:
-                                                          ElevatedButton.styleFrom(
-                                                            backgroundColor:
-                                                                buttonColor,
-                                                          ),
-                                                      child: Text(buttonText),
-                                                    );
-                                                  },
-                                                ),
+                                              return ElevatedButton(
+                                                onPressed: (exemptionStatus == "approved" || punchOutTime == null)
+                                                    ? null
+                                                    : () async {
+                                                  final docRef = FirebaseFirestore.instance
+                                                      .collection("attendance")
+                                                      .doc(data["id"]);
+                                                  await docRef.update({'exemptionStatus': "approved"});
+                                                  setInnerState(() => data['exemptionStatus'] = "approved");
+                                                  setState(() {});
+                                                },
+                                                style: ElevatedButton.styleFrom(backgroundColor: buttonColor),
+                                                child: Text(buttonText),
+                                              );
+                                            },
+                                          ),
                                         ),
+
                                       ],
                                     );
                                   }).toList(),
