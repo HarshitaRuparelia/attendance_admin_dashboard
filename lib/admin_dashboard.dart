@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'leave_approval_screen.dart';
 import 'holiday_calendar_dialog.dart';
 import 'package:rxdart/rxdart.dart';
+import 'package:data_table_2/data_table_2.dart';
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -94,62 +95,94 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Stream<Map<String, List<Map<String, dynamic>>>> _combinedStream() {
-    final start = startDate!;
-    final end = endDate!.add(const Duration(days: 1));
-    print("✅ Combined stream refreshed for $startDate → $endDate");
+    final DateTime start = DateTime(startDate!.year, startDate!.month, startDate!.day);
+    final DateTime end = DateTime(endDate!.year, endDate!.month, endDate!.day, 23, 59, 59);
 
+    print("✅ Combined stream refreshed for $start → $end");
+
+    // --- ATTENDANCE: punchIn inside the range ---
     final attendanceStream = FirebaseFirestore.instance
         .collection("attendance")
-        .where("punchInTime", isGreaterThanOrEqualTo: start)
-        .where("punchInTime", isLessThan: end)
+        .where("punchInTime", isLessThanOrEqualTo: Timestamp.fromDate(end))
         .snapshots();
 
-    final leavesStream = FirebaseFirestore.instance
+    // --- LEAVES: any part of leave overlapping range ---
+    final leaveStream = FirebaseFirestore.instance
         .collection("leaves")
+        .where("startDate", isLessThanOrEqualTo: Timestamp.fromDate(end))
         .snapshots();
 
-    final holidaysStream = FirebaseFirestore.instance
+    // --- HOLIDAYS inside range ---
+    final holidayStream = FirebaseFirestore.instance
         .collection("holidays")
         .where("date", isGreaterThanOrEqualTo: Timestamp.fromDate(start))
-        .where("date", isLessThan: Timestamp.fromDate(end))
+        .where("date", isLessThanOrEqualTo: Timestamp.fromDate(end))
         .snapshots();
 
-    return Rx.combineLatest3(attendanceStream, leavesStream, holidaysStream, (
-      QuerySnapshot attendanceSnap,
-      QuerySnapshot leaveSnap,
-      QuerySnapshot holidaySnap,
-    ) {
-      final attendance = attendanceSnap.docs.map((d) {
-        final data = d.data() as Map<String, dynamic>;
-        data["id"] = d.id;
-        data["type"] = "attendance";
-        return data;
-      }).toList();
+    return Rx.combineLatest3(
+      attendanceStream,
+      leaveStream,
+      holidayStream,
+          (QuerySnapshot attendanceSnap,
+          QuerySnapshot leaveSnap,
+          QuerySnapshot holidaySnap) {
 
-      final leaves = leaveSnap.docs
-          .map((d) {
-            final data = d.data() as Map<String, dynamic>;
-            data["id"] = d.id;
-            data["type"] = "leave";
-            return data;
-          })
-          .where((leave) {
-            final sDate = (leave["startDate"] as Timestamp).toDate();
-            final eDate = (leave["endDate"] as Timestamp).toDate();
-            return sDate.isBefore(end) && eDate.isAfter(start);
-          })
-          .toList();
+        // --- Helper: Check date overlap between two ranges ---
+        bool overlaps(DateTime aStart, DateTime aEnd) {
+          return aStart.isBefore(end) && aEnd.isAfter(start);
+        }
 
-      final holidays = holidaySnap.docs.map((d) {
-        final data = d.data() as Map<String, dynamic>;
-        data["id"] = d.id;
-        data["type"] = "holiday";
-        return data;
-      }).toList();
+        // --------------------
+        // ATTENDANCE PROCESSING
+        // --------------------
+        final attendance = attendanceSnap.docs.map((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          data["id"] = doc.id;
+          data["type"] = "attendance";
+          return data;
+        }).where((rec) {
+          final punchIn = (rec["punchInTime"] as Timestamp?)?.toDate();
+          final punchOut = (rec["punchOutTime"] as Timestamp?)?.toDate() ?? punchIn;
 
-      return {"attendance": attendance, "leaves": leaves, "holidays": holidays};
-    });
+          if (punchIn == null) return false;
+          return overlaps(punchIn, punchOut!);
+        }).toList();
+
+        // --------------------
+        // LEAVES PROCESSING
+        // --------------------
+        final leaves = leaveSnap.docs.map((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          data["id"] = doc.id;
+          data["type"] = "leave";
+          return data;
+        }).where((leave) {
+          final s = (leave["startDate"] as Timestamp).toDate();
+          final e = (leave["endDate"] as Timestamp).toDate();
+          return !s.isAfter(end) && !e.isBefore(start); // ✅ inclusive check
+        }).toList();
+
+
+        // --------------------
+        // HOLIDAYS
+        // --------------------
+        final holidays = holidaySnap.docs.map((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          data["id"] = doc.id;
+          data["type"] = "holiday";
+          return data;
+        }).toList();
+
+        // RETURN COMBINED
+        return {
+          "attendance": attendance,
+          "leaves": leaves,
+          "holidays": holidays,
+        };
+      },
+    );
   }
+
 
   Future<void> _exportToExcel(
     List<Map<String, dynamic>> attendance,
@@ -438,9 +471,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     ElevatedButton.icon(
                       icon: const Icon(Icons.date_range),
                       label: Text(
-                        startDate != null && endDate != null
-                            ? "${DateFormat('dd MMM').format(startDate!)} - ${DateFormat('dd MMM yyyy').format(endDate!)}"
-                            : "Select Date Range",
+                        startDate == endDate
+                            ? DateFormat('dd MMM yyyy').format(startDate!)
+                            : "${DateFormat('dd MMM').format(startDate!)} - ${DateFormat('dd MMM yyyy').format(endDate!)}"
+
+
                       ),
                       onPressed: () => _selectDateRange(context),
                     ),
@@ -485,38 +520,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       ? const Center(
                           child: Text("No records found for selected range."),
                         )
-                      : Scrollbar(
-                          controller: _scrollController,
-                          thumbVisibility: true,
-                          trackVisibility: true,
-                          interactive: true,
-                          child: SingleChildScrollView(
-                            controller: _scrollController,
-                            scrollDirection: Axis.vertical,
-                            child: Scrollbar(
-                              thumbVisibility: true,
-                              trackVisibility: true,
-                              interactive: true,
-                              notificationPredicate: (_) => true,
-                              child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: DataTable(
-                                  columnSpacing: 15,
-                                  dataRowMaxHeight: 70,
-                                  columns: const [
-                                    DataColumn(label: Text("Employee")),
-                                    DataColumn(label: Text("Type")),
-                                    DataColumn(label: Text("Selfie In")),
-                                    DataColumn(label: Text("In Address")),
-                                    DataColumn(label: Text("Selfie Out")),
-                                    DataColumn(label: Text("Out Address")),
-                                    DataColumn(label: Text("Punch In")),
-                                    DataColumn(label: Text("Punch Out")),
-                                    DataColumn(label: Text("Date / Range")),
-                                    DataColumn(label: Text("Total Hours")),
-                                    DataColumn(label: Text("Leave Status")),
-                                    DataColumn(label: Text("Exempt")),
-                                  ],
+                : DataTable2(
+            fixedTopRows: 1,                       // ❄ Freeze header
+            columnSpacing: 6,
+            headingRowHeight: 56,
+            dataRowHeight: 70,
+           minWidth: 1400,                        // Table width
+            //horizontalMargin: 10,
+            scrollController: _scrollController,
+            columns: const [
+            DataColumn2(label: Text("Employee")),
+            DataColumn2(label: Text("Type")),
+            DataColumn2(label: Text("Selfie In")),
+            DataColumn2(label: Text("In Address")),
+            DataColumn2(label: Text("Selfie Out")),
+            DataColumn2(label: Text("Out Address")),
+            DataColumn2(label: Text("Punch In")),
+            DataColumn2(label: Text("Punch Out")),
+            DataColumn2(label: Text("Date / Range")),
+            DataColumn2(label: Text("Total Hours")),
+            DataColumn2(label: Text("Leave Status")),
+            DataColumn2(label: Text("Exempt")),
+            ],
                                   rows: allRecords.map((data) {
                                     final type = data["type"];
                                     final isLeave = type == "leave";
@@ -578,9 +603,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
 
                                     final rowColor = isHoliday
-                                        ? Colors.green[100]
+                                        ? Colors.green[200]
                                         : isLeave
-                                        ? Colors.yellow[50]
+                                        ? Colors.yellow[200]
                                         : null;
 
                                     return DataRow(
@@ -729,85 +754,68 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                         DataCell(
                                           Text(
                                             isHoliday
-                                                ? DateFormat(
-                                                    'dd MMM yyyy',
-                                                  ).format(
-                                                    (data["date"] as Timestamp)
-                                                        .toDate(),
-                                                  )
+                                                ? DateFormat('dd MMM yyyy').format((data["date"] as Timestamp).toDate())
                                                 : isLeave
-                                                ? "${DateFormat('dd MMM').format((data["startDate"] as Timestamp).toDate())} - ${DateFormat('dd MMM').format((data["endDate"] as Timestamp).toDate())}"
+                                                ? () {
+                                              final leaveStart = (data["startDate"] as Timestamp).toDate();
+                                              final leaveEnd = (data["endDate"] as Timestamp).toDate();
+                                              return leaveStart == leaveEnd
+                                                  ? DateFormat('dd MMM yyyy').format(leaveStart)
+                                                  : "${DateFormat('dd MMM').format(leaveStart)} - ${DateFormat('dd MMM').format(leaveEnd)}";
+                                            }()
                                                 : punchInTime != null
-                                                ? DateFormat(
-                                                    'dd MMM yyyy',
-                                                  ).format(punchInTime)
+                                                ? DateFormat('dd MMM yyyy').format(punchInTime)
                                                 : "-",
                                           ),
                                         ),
+
+
+
                                         DataCell(
-                                          (isHalfDay &&
-                                                  (data['exemptionStatus'] !=
-                                                      "approved"))
-                                              ? Row(
-                                                  children: [
-                                                    const Icon(
-                                                      Icons.access_time_filled,
-                                                      color: Colors.red,
-                                                      size: 20,
+                                          ConstrainedBox(
+                                            constraints: const BoxConstraints(
+                                              minWidth: 120, // 👈 adjust until one-line
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                if (isHalfDay && data['exemptionStatus'] != "approved") ...[
+                                                  const Icon(Icons.access_time_filled, color: Colors.red, size: 20),
+                                                  const SizedBox(width: 6),
+                                                ],
+
+                                                if (!isHalfDay && data['exemptionStatus'] == "approved") ...[
+                                                  Tooltip(
+                                                    message: "Exempted by Admin",
+                                                    child: const Icon(Icons.verified_user,
+                                                        color: Colors.green, size: 20),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                ],
+
+                                                Expanded(
+                                                  child: Text(
+                                                    totalHoursText,
+                                                    maxLines: 1,
+                                                    softWrap: false,
+                                                    overflow: TextOverflow.visible, // 👈 no wrapping, no ellipsis
+                                                    style: TextStyle(
+                                                      color: (data['exemptionStatus'] == "approved")
+                                                          ? Colors.green
+                                                          : (isHalfDay ? Colors.red : Colors.black),
+                                                      fontWeight: (data['exemptionStatus'] == "approved" ||
+                                                          isHalfDay)
+                                                          ? FontWeight.bold
+                                                          : FontWeight.normal,
                                                     ),
-                                                    const SizedBox(width: 6),
-                                                    Expanded(
-                                                      child: Text(
-                                                        totalHoursText,
-                                                        style: const TextStyle(
-                                                          color: Colors.red,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                )
-                                              : Row(
-                                                  children: [
-                                                    if (data['exemptionStatus'] ==
-                                                        "approved")
-                                                      Tooltip(
-                                                        message:
-                                                            "Exempted by Admin",
-                                                        waitDuration: Duration(
-                                                          milliseconds: 300,
-                                                        ),
-                                                        child: const Icon(
-                                                          Icons.verified_user,
-                                                          color: Colors.green,
-                                                          size: 20,
-                                                        ),
-                                                      ),
-                                                    if (data['exemptionStatus'] ==
-                                                        "approved")
-                                                      const SizedBox(width: 6),
-                                                    Expanded(
-                                                      child: Text(
-                                                        totalHoursText,
-                                                        style: TextStyle(
-                                                          color:
-                                                              data['exemptionStatus'] ==
-                                                                  "approved"
-                                                              ? Colors.green
-                                                              : Colors.black,
-                                                          fontWeight:
-                                                              data['exemptionStatus'] ==
-                                                                  "approved"
-                                                              ? FontWeight.bold
-                                                              : FontWeight
-                                                                    .normal,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                  ],
+                                                  ),
                                                 ),
+                                              ],
+                                            ),
+                                          ),
                                         ),
+
+
+
 
                                         DataCell(
                                           Text(
@@ -821,53 +829,69 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                         DataCell(
                                           isLeave || isHoliday
                                               ? const Text("N/A")
-                                              : StatefulBuilder(
-                                            builder: (context, setInnerState) {
+                                              : Builder(
+                                            builder: (context) {
                                               final exemptionStatus = data['exemptionStatus'] ?? "none";
                                               final punchOutTime = data["punchOutTime"] as Timestamp?;
 
                                               String buttonText;
                                               Color buttonColor;
+                                              bool enabled = true;
 
                                               if (punchOutTime == null) {
                                                 buttonText = "Not punched out yet";
                                                 buttonColor = Colors.redAccent;
+                                                enabled = false;
                                               } else if (exemptionStatus == "requested") {
                                                 buttonText = "Exemption Requested";
                                                 buttonColor = Colors.orangeAccent;
                                               } else if (exemptionStatus == "approved") {
                                                 buttonText = "Exempted ✅";
                                                 buttonColor = Colors.green;
+                                                enabled = false;
                                               } else {
                                                 buttonText = "Mark Exempt";
                                                 buttonColor = Colors.grey;
                                               }
 
-                                              return ElevatedButton(
-                                                onPressed: (exemptionStatus == "approved" || punchOutTime == null)
-                                                    ? null
-                                                    : () async {
-                                                  final docRef = FirebaseFirestore.instance
-                                                      .collection("attendance")
-                                                      .doc(data["id"]);
-                                                  await docRef.update({'exemptionStatus': "approved"});
-                                                  setInnerState(() => data['exemptionStatus'] = "approved");
-                                                  setState(() {});
-                                                },
-                                                style: ElevatedButton.styleFrom(backgroundColor: buttonColor),
-                                                child: Text(buttonText),
+                                              return ConstrainedBox(
+                                                constraints: const BoxConstraints(
+                                                  minWidth: 250,   // 👈 make this big to force max width
+                                                ), // 👈 prevents overflow inside DataTable
+                                                child: ElevatedButton(
+                                                  onPressed: enabled
+                                                      ? () async {
+                                                    await FirebaseFirestore.instance
+                                                        .collection("attendance")
+                                                        .doc(data["id"])
+                                                        .update({'exemptionStatus': "approved"});
+
+                                                    setState(() {
+                                                      data['exemptionStatus'] = "approved";
+                                                    });
+                                                  }
+                                                      : null,
+                                                  style: ElevatedButton.styleFrom(
+                                                    backgroundColor: buttonColor,
+                                                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                                                  ),
+                                                  child: Text(
+                                                    buttonText,
+                                                    maxLines: 2,
+                                                    //softWrap: false,
+                                                   overflow: TextOverflow.visible,
+                                                  ),
+                                                ),
                                               );
                                             },
                                           ),
                                         ),
 
+
                                       ],
                                     );
                                   }).toList(),
-                                ),
-                              ),
-                            ),
-                          ),
+
                         ),
                 ),
               ],
