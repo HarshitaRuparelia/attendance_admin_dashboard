@@ -741,17 +741,25 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                         ),
 
                                         DataCell(
-                                          Text(
-                                            isLeave || isHoliday
-                                                ? "-"
-                                                : punchOutTime != null
-                                                ? DateFormat(
-                                                    'hh:mm a',
-                                                  ).format(punchOutTime)
-                                                : "-",
-                                          ),
-                                        ),
-                                        DataCell(
+
+                                    Container(
+                                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                                    decoration: BoxDecoration(
+                                    color: data['autoLogout'] == true ? Colors.red.withOpacity(0.15) : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                    isLeave || isHoliday
+                                    ? "-"
+                                        : punchOutTime != null
+                                        ? "${DateFormat('hh:mm a').format(punchOutTime)}${data['autoLogout']==true ? ' \n(Auto punch-out)' : ''}"
+                                        : "-",
+                                    ),
+                                    ),
+                                    ),
+
+
+                                    DataCell(
                                           Text(
                                             isHoliday
                                                 ? DateFormat('dd MMM yyyy').format((data["date"] as Timestamp).toDate())
