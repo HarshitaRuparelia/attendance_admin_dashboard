@@ -16,12 +16,66 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
   final TextEditingController _holidayNameController = TextEditingController();
   Map<DateTime, String> _holidays = {};
   bool _dataChanged = false;
+  Map<DateTime, List<Map<String, dynamic>>> _leavesByDay = {};
+  Map<String, String> _userNames = {};
 
   @override
   void initState() {
     super.initState();
+    _loadUsers();
     _loadHolidays();
+    _loadLeaves();
   }
+  Future<void> _loadUsers() async {
+    final snapshot =
+    await FirebaseFirestore.instance.collection('users').get();
+
+    final Map<String, String> temp = {};
+
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      temp[doc.id] = data['name'] ?? 'Unknown';
+    }
+
+    setState(() => _userNames = temp);
+  }
+  Future<void> _loadLeaves() async {
+    final snapshot = await FirebaseFirestore.instance
+        .collection('leaves')
+        .where('status', isEqualTo: 'Approved')
+        .get();
+
+    final Map<DateTime, List<Map<String, dynamic>>> temp = {};
+
+    for (final doc in snapshot.docs) {
+      final data = doc.data() as Map<String, dynamic>;
+
+      final startTs = data['startDate'] as Timestamp;
+      final endTs = data['endDate'] as Timestamp;
+
+      DateTime start = DateTime(
+        startTs.toDate().year,
+        startTs.toDate().month,
+        startTs.toDate().day,
+      );
+
+      DateTime end = DateTime(
+        endTs.toDate().year,
+        endTs.toDate().month,
+        endTs.toDate().day,
+      );
+
+      DateTime current = start;
+
+      while (!current.isAfter(end)) {
+        temp.putIfAbsent(current, () => []);
+        temp[current]!.add(data);
+        current = current.add(const Duration(days: 1));
+      }
+    }
+    setState(() => _leavesByDay = temp);
+  }
+
 
   Future<void> _loadHolidays() async {
     final snapshot = await FirebaseFirestore.instance.collection('holidays').get();
@@ -120,9 +174,17 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
                   firstDay: DateTime.utc(2020),
                   lastDay: DateTime.utc(2030),
                   focusedDay: _focusedDay,
+
                   selectedDayPredicate: (day) => isSameDay(_selectedDay, day),
+
                   holidayPredicate: (day) =>
                       _holidays.keys.any((h) => isSameDay(h, day)),
+
+                  eventLoader: (day) {
+                    final key = DateTime(day.year, day.month, day.day);
+                    return _leavesByDay[key] ?? [];
+                  },
+
                   onDaySelected: (selectedDay, focusedDay) {
                     setState(() {
                       _selectedDay = selectedDay;
@@ -131,6 +193,39 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
                           _holidays[selectedDay] ?? '';
                     });
                   },
+
+                  calendarBuilders: CalendarBuilders(
+                    markerBuilder: (context, day, events) {
+                      if (events.isEmpty) return null;
+
+                      return Tooltip(
+                        message: events.map((e) {
+                          final leave = e as Map<String, dynamic>;
+                          final uid = leave['userId'];
+                          final name = _userNames[uid] ?? 'Unknown';
+                          final type = leave['type'] ?? 'Leave';
+
+                          return "👤 $name\n📝 $type";
+                        }).join("\n\n"),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(
+                            events.length.clamp(1, 3),
+                                (_) => Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 1),
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: Colors.yellow[900],
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+
                   calendarStyle: CalendarStyle(
                     isTodayHighlighted: true,
                     holidayTextStyle: const TextStyle(color: Colors.green),
@@ -143,11 +238,13 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
                       shape: BoxShape.circle,
                     ),
                   ),
+
                   headerStyle: const HeaderStyle(
                     formatButtonVisible: false,
                     titleCentered: true,
                   ),
                 ),
+
                 const SizedBox(height: 15),
                 if (_selectedDay != null) ...[
                   Text(
@@ -185,7 +282,7 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
                         icon: const Icon(Icons.add),
                         label: const Text("Add"),
                       ),
-                      ElevatedButton.icon(
+                      /*ElevatedButton.icon(
                         onPressed: () async {
                           await _deleteHoliday(_selectedDay!);
                           _holidayNameController.clear();
@@ -198,7 +295,7 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
                           backgroundColor: Colors.redAccent,
                         ),
                         label: const Text("Delete"),
-                      ),
+                      ),*/
                     ],
                   ),
                 ],
