@@ -55,10 +55,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Future<void> _selectDateRange(BuildContext context) async {
+    final now = DateTime.now();
     final picked = await showDateRangePicker(
       context: context,
-      firstDate: DateTime(2024),
-      lastDate: DateTime(2026),
+      firstDate: DateTime(now.year - 1, 1, 1),
+      lastDate: DateTime(now.year + 1, 0, 1),
       initialDateRange: DateTimeRange(start: startDate!, end: endDate!),
     );
 
@@ -93,6 +94,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
       ),
     );
   }
+  double calculateTotalHours(List<Map<String, dynamic>> attendance) {
+    int totalMinutes = 0;
+
+    for (final a in attendance) {
+      final minutes = a['totalHours'];
+      if (minutes is int && minutes > 0) {
+        totalMinutes += minutes;
+      }
+    }
+
+    // Convert minutes → hours (2 decimal places)
+    return double.parse((totalMinutes / 60).toStringAsFixed(2));
+  }
+
 
   Stream<Map<String, List<Map<String, dynamic>>>> _combinedStream() {
     final DateTime start = DateTime(startDate!.year, startDate!.month, startDate!.day);
@@ -183,7 +198,31 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
+  bool isInDateRange(DateTime date) {
+    if (startDate == null && endDate == null) return true;
 
+    final start = startDate != null
+        ? DateTime(startDate!.year, startDate!.month, startDate!.day)
+        : null;
+
+    final end = endDate != null
+        ? DateTime(endDate!.year, endDate!.month, endDate!.day, 23, 59, 59)
+        : null;
+
+    if (start != null && end != null) {
+      return !date.isBefore(start) && !date.isAfter(end);
+    }
+
+    if (start != null) {
+      return !date.isBefore(start);
+    }
+
+    if (end != null) {
+      return !date.isAfter(end);
+    }
+
+    return true;
+  }
   Future<void> _exportToExcel(
     List<Map<String, dynamic>> attendance,
     List<Map<String, dynamic>> leaves,
@@ -199,7 +238,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         'Punch In',
         'Punch Out',
         'Date',
-        'Total Minutes',
+        'Total Hours',
         'Leave Status',
         'Exempt Status',
         'In Address',
@@ -221,7 +260,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
         final exemptionStatus = record["exemptionStatus"] ?? "none";
 
         // Duration in minutes (if punchOut exists)
-        final totalMinutes = record['totalHours'] ?? 0;
+        final totalMinutes = (record['totalHours'] ?? 0) as int;
+        final totalHours = (totalMinutes / 60);
 
         // Exempt status text
         String exemptText;
@@ -245,7 +285,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
           punchInTime != null
               ? DateFormat('dd MMM yyyy').format(punchInTime)
               : "-",
-          totalMinutes, // 0 if not punched out
+          totalHours, // 0 if not punched out
           "-", // leave status
           exemptText,
           record["punchInAddress"] ?? "-",
@@ -267,12 +307,23 @@ class _AdminDashboardState extends State<AdminDashboard> {
         final start = (leave["startDate"] as Timestamp).toDate();
         final end = (leave["endDate"] as Timestamp).toDate();
 
+        final sameDay = DateUtils.isSameDay(start, end);
+        String date = "";
+
+        if (sameDay) {
+          date = DateFormat('dd MMM yyyy').format(start);
+        }
+        else {
+          date = "${DateFormat('dd MMM yyyy').format(start)} - ${DateFormat('dd MMM yyyy').format(end)}";
+        }
+
+
         sheet.appendRow([
           employee["name"] ?? "Unknown",
           "Leave",
           "-",
           "-",
-          "${DateFormat('dd MMM').format(start)} - ${DateFormat('dd MMM').format(end)}",
+          date,
           0,
           leave["status"] ?? "-",
           "-",
@@ -433,19 +484,92 @@ class _AdminDashboardState extends State<AdminDashboard> {
             final leaves = snapshot.data?["leaves"] ?? [];
             final holidays = snapshot.data?["holidays"] ?? [];
 
-            final allRecords = [...attendance, ...leaves, ...holidays]
-                .where(
-                  (data) =>
-                      selectedEmployee == null ||
-                      data["userId"] == selectedEmployee ||
-                      data["type"] == "holiday",
-                )
-                .toList();
+            // 🔹 Employee filter
+            final filteredAttendance = selectedEmployee == null
+                ? attendance
+                : attendance.where((a) => a["userId"] == selectedEmployee).toList();
+
+            final filteredLeaves = selectedEmployee == null
+                ? leaves
+                : leaves.where((l) => l["userId"] == selectedEmployee).toList();
+
+            // Holidays are global
+            final filteredHolidays = holidays;
+            final dateFilteredAttendance = filteredAttendance.where((a) {
+              final punchIn = (a["punchInTime"] as Timestamp?)?.toDate();
+              return punchIn != null && isInDateRange(punchIn);
+            }).toList();
+            final totalWorkedHours = calculateTotalHours(dateFilteredAttendance);
+
+            final dateFilteredLeaves = filteredLeaves.where((l) {
+              final start = (l["startDate"] as Timestamp).toDate();
+              final end = (l["endDate"] as Timestamp).toDate();
+
+              if (startDate != null && endDate != null) {
+                return !(end.isBefore(startDate!) || start.isAfter(endDate!));
+              }
+
+              if (startDate != null && endDate == null) {
+                return !startDate!.isBefore(start) && !startDate!.isAfter(end);
+              }
+
+              return true;
+            }).toList();
+
+            final dateFilteredHolidays = filteredHolidays.where((h) {
+              final date = (h["date"] as Timestamp?)?.toDate();
+              return date != null && isInDateRange(date);
+            }).toList();
+
+            final allRecords = [
+              ...dateFilteredAttendance,
+              ...dateFilteredLeaves,
+              ...dateFilteredHolidays,
+            ];
 
             final hasRecords = allRecords.isNotEmpty;
 
             return Column(
               children: [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.amberAccent.shade100,
+                    borderRadius: BorderRadius.circular(10),
+                    border: BoxBorder.all(color: Colors.black45),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        selectedEmployee == null
+                            ? "All Employees"
+                            : employees
+                            .firstWhere(
+                              (e) => e["uid"] == selectedEmployee,
+                          orElse: () => {"name": "Unknown"},
+                        )["name"] ??
+                            "Unknown",
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+
+                      Text(
+                        "Total Hours: $totalWorkedHours hrs",
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
                 // 🔹 Always-visible Filters
                 Row(
                   children: [
@@ -504,7 +628,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       label: const Text("Export to Excel"),
                       onPressed: hasRecords
                           ? () async {
-                              _exportToExcel(attendance, leaves, holidays);
+                              _exportToExcel(dateFilteredAttendance, dateFilteredLeaves, dateFilteredHolidays);
                             }
                           : null,
                     ),
