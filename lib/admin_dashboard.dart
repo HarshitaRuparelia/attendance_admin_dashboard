@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:excel/excel.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
+import 'employee_monthly_summary_screen.dart';
 import 'leave_approval_screen.dart';
 import 'holiday_calendar_dialog.dart';
 import 'package:rxdart/rxdart.dart';
@@ -621,7 +622,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
     super.dispose();
   }
 
-
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<Map<String, List<Map<String, dynamic>>>>(
@@ -678,6 +678,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     if (updated == true) {
                       setState(() {});
                     }
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.analytics),
+                  tooltip: "Summary",
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => EmployeeMonthlySummaryScreen(
+                          employees: employees,
+                        ),
+                      ),
+                    );
                   },
                 ),
 

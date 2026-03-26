@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
@@ -100,6 +102,186 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
     }
   }
 
+  // Widget _buildLeaveList(String status) {
+  //   return StreamBuilder<QuerySnapshot>(
+  //     stream: _getLeaveStream(status),
+  //     builder: (context, snapshot) {
+  //       if (snapshot.connectionState == ConnectionState.waiting) {
+  //         return const Center(child: CircularProgressIndicator());
+  //       }
+  //
+  //       if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+  //         return Center(child: Text("No $status leaves found"));
+  //       }
+  //
+  //       final docs = snapshot.data!.docs;
+  //
+  //       return ListView.builder(
+  //         itemCount: docs.length,
+  //         itemBuilder: (context, index) {
+  //           final data = docs[index].data() as Map<String, dynamic>;
+  //           final userId = data['userId'] ?? '';
+  //           final name = employees[userId] ?? 'Unknown';
+  //           final startDate = (data['startDate'] as Timestamp).toDate();
+  //           final endDate = (data['endDate'] as Timestamp).toDate();
+  //           final appliedOn = (data['appliedOn'] as Timestamp?)?.toDate();
+  //           final reason = (data['reason'] ?? '').toString();
+  //           final leaveType = (data['type'] ?? 'N/A').toString();
+  //
+  //           return Container(
+  //             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+  //             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+  //             decoration: BoxDecoration(
+  //               color: Colors.grey.shade50,
+  //               borderRadius: BorderRadius.circular(8),
+  //               border: BoxBorder.all(color: Colors.grey.shade300),
+  //             ),
+  //             child: Column(
+  //               crossAxisAlignment: CrossAxisAlignment.start,
+  //               children: [
+  //
+  //                 /// 🔹 ROW 1 → Name | Dates | Applied | Type | Status
+  //                 Row(
+  //                   children: [
+  //
+  //                     /// Name
+  //                     Expanded(
+  //                       flex: 2,
+  //                       child: Text(
+  //                         name,
+  //                         style: const TextStyle(
+  //                           fontWeight: FontWeight.w600,
+  //                           fontSize: 13,
+  //                         ),
+  //                         overflow: TextOverflow.ellipsis,
+  //                       ),
+  //                     ),
+  //
+  //                     /// Date Range
+  //                     Expanded(
+  //                       flex: 2,
+  //                       child: Text(
+  //                         "${DateFormat('dd MMM').format(startDate)} → "
+  //                             "${DateFormat('dd MMM yyyy').format(endDate)}",
+  //                         style: const TextStyle(fontSize: 12),
+  //                         overflow: TextOverflow.ellipsis,
+  //                       ),
+  //                     ),
+  //
+  //                     /// Applied On
+  //                     Expanded(
+  //                       flex: 2,
+  //                       child: Text(
+  //                         appliedOn != null
+  //                             ? "Applied: ${DateFormat('dd MMM, hh:mm a').format(appliedOn)}"
+  //                             : "Applied: -",
+  //                         style: const TextStyle(
+  //                             fontSize: 11, color: Colors.grey),
+  //                         overflow: TextOverflow.ellipsis,
+  //                       ),
+  //                     ),
+  //
+  //                     /// Leave Type
+  //                     Container(
+  //                       padding: const EdgeInsets.symmetric(
+  //                           horizontal: 8, vertical: 3),
+  //                       decoration: BoxDecoration(
+  //                         color: Colors.blue.shade50,
+  //                         borderRadius: BorderRadius.circular(12),
+  //                       ),
+  //                       child: Text(
+  //                         leaveType,
+  //                         style: const TextStyle(
+  //                           fontSize: 10,
+  //                           color: Colors.blue,
+  //                           fontWeight: FontWeight.w600,
+  //                         ),
+  //                       ),
+  //                     ),
+  //
+  //                     const SizedBox(width: 8),
+  //
+  //                     /// Status Badge
+  //                     Container(
+  //                       padding: const EdgeInsets.symmetric(
+  //                           horizontal: 8, vertical: 3),
+  //                       decoration: BoxDecoration(
+  //                         color: status == "Approved"
+  //                             ? Colors.green.shade50
+  //                             : status == "Rejected"
+  //                             ? Colors.red.shade50
+  //                             : Colors.orange.shade50,
+  //                         borderRadius: BorderRadius.circular(12),
+  //                       ),
+  //                       child: Text(
+  //                         status,
+  //                         style: TextStyle(
+  //                           fontSize: 10,
+  //                           fontWeight: FontWeight.w600,
+  //                           color: status == "Approved"
+  //                               ? Colors.green
+  //                               : status == "Rejected"
+  //                               ? Colors.red
+  //                               : Colors.orange,
+  //                         ),
+  //                       ),
+  //                     ),
+  //                   ],
+  //                 ),
+  //
+  //                 const SizedBox(height: 6),
+  //
+  //                 /// 🔹 ROW 2 → Reason + Approve/Reject
+  //                 Row(
+  //                   children: [
+  //
+  //                     /// Reason
+  //                     Expanded(
+  //                       child: Text(
+  //                         reason.isNotEmpty ? reason : "-",
+  //                         style: const TextStyle(
+  //                           fontSize: 12,
+  //                           color: Colors.black87,
+  //                         ),
+  //                         overflow: TextOverflow.ellipsis,
+  //                         maxLines: 1,
+  //                       ),
+  //                     ),
+  //
+  //                     /// Buttons (Only if Pending)
+  //                     if (status == "Pending")
+  //                       Row(
+  //                         children: [
+  //                           IconButton(
+  //                             icon: const Icon(Icons.check_circle,
+  //                                 color: Colors.green, size: 20),
+  //                             padding: EdgeInsets.zero,
+  //                             constraints: const BoxConstraints(),
+  //                             onPressed: () =>
+  //                                 _updateLeaveStatus(docs[index].id, "Approved"),
+  //                           ),
+  //                           const SizedBox(width: 6),
+  //                           IconButton(
+  //                             icon: const Icon(Icons.cancel,
+  //                                 color: Colors.red, size: 20),
+  //                             padding: EdgeInsets.zero,
+  //                             constraints: const BoxConstraints(),
+  //                             onPressed: () =>
+  //                                 _updateLeaveStatus(docs[index].id, "Rejected"),
+  //                           ),
+  //                         ],
+  //                       ),
+  //                   ],
+  //                 ),
+  //               ],
+  //             ),
+  //           );
+  //         },
+  //       );
+  //     },
+  //   );
+  // }
+
   Widget _buildLeaveList(String status) {
     return StreamBuilder<QuerySnapshot>(
       stream: _getLeaveStream(status),
@@ -114,50 +296,161 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
 
         final docs = snapshot.data!.docs;
 
-        return ListView.builder(
-          itemCount: docs.length,
-          itemBuilder: (context, index) {
-            final data = docs[index].data() as Map<String, dynamic>;
-            final userId = data['userId'] ?? '';
-            final name = employees[userId] ?? 'Unknown';
-            final startDate = (data['startDate'] as Timestamp).toDate();
-            final endDate = (data['endDate'] as Timestamp).toDate();
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final screenWidth = constraints.maxWidth;
 
-            return Card(
-              margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: ListTile(
-                title: Text(
-                  name,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold, fontSize: 16),
+            final tableWidth = math.min(screenWidth, 1200.0);
+            return SingleChildScrollView(
+              scrollDirection: Axis.vertical,
+              child: Center(
+                child: SizedBox(
+                  width: tableWidth,
+
+                  child: DataTable(
+                    columnSpacing: 20,
+                    headingRowHeight: 45,
+                    dataRowMinHeight: 55,
+                    dataRowMaxHeight: 65,
+                    headingRowColor:
+                    MaterialStateProperty.all(Colors.grey.shade200),
+                    columns: const [
+                      DataColumn(label: Text("Name")),
+                      DataColumn(label: Text("Start → End")),
+                      DataColumn(label: Text("Applied On")),
+                      DataColumn(label: Text("Type")),
+                      DataColumn(label: Text("Status")),
+                      DataColumn(label: Text("Reason")),
+                      DataColumn(label: Text("Action")),
+                    ],
+                    rows: docs.map((doc) {
+                      final data = doc.data() as Map<String, dynamic>;
+
+                      final userId = data['userId'] ?? '';
+                      final name = employees[userId] ?? 'Unknown';
+
+                      final startDate =
+                      (data['startDate'] as Timestamp).toDate();
+                      final endDate =
+                      (data['endDate'] as Timestamp).toDate();
+                      final appliedOn =
+                      (data['appliedOn'] as Timestamp?)?.toDate();
+
+                      final leaveType =
+                      (data['type'] ?? 'N/A').toString();
+                      final reason =
+                      (data['reason'] ?? '').toString();
+
+                      return DataRow(
+                        cells: [
+
+                          /// Name
+                          DataCell(Text(name)),
+
+                          /// Date Range
+                          DataCell(
+                            Text(
+                              "${DateFormat('dd MMM').format(startDate)} → "
+                                  "${DateFormat('dd MMM yyyy').format(endDate)}",
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w500),
+                            ),
+                          ),
+
+                          /// Applied On
+                          DataCell(
+                            Text(
+                              appliedOn != null
+                                  ? DateFormat(
+                                  'dd MMM yyyy, hh:mm a')
+                                  .format(appliedOn)
+                                  : "-",
+                            ),
+                          ),
+
+                          /// Leave Type
+                          DataCell(
+                            Text(
+                              leaveType,
+                              style: const TextStyle(
+                                color: Colors.blue,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+
+                          /// Status
+                          DataCell(
+                            Text(
+                              status,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w600,
+                                color: status == "Approved"
+                                    ? Colors.green
+                                    : status == "Rejected"
+                                    ? Colors.red
+                                    : Colors.orange,
+                              ),
+                            ),
+                          ),
+
+                          /// Reason (More Space Now)
+                          DataCell(
+                            InkWell(
+                              onTap: () {
+                                _showReasonDialog(context, reason);
+                              },
+                              child: SizedBox(
+                                width: 180,
+                                child: Text(
+                                  reason.isNotEmpty ? reason : "-",
+                                  overflow: TextOverflow.ellipsis,
+                                  maxLines: 3,
+                                  style: const TextStyle(
+                                    //color: Colors.blue,
+                                    //decoration: TextDecoration.underline,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          /// Action
+                          DataCell(
+                            status == "Pending"
+                                ? Row(
+                              children: [
+                                IconButton(
+                                  icon: const Icon(
+                                      Icons.check,
+                                      color:
+                                      Colors.green),
+                                  onPressed: () =>
+                                      _updateLeaveStatus(
+                                          doc.id,
+                                          "Approved"),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                      Icons.close,
+                                      color:
+                                      Colors.red),
+                                  onPressed: () =>
+                                      _updateLeaveStatus(
+                                          doc.id,
+                                          "Rejected"),
+                                ),
+                              ],
+                            )
+                                : const Text("-"),
+                          ),
+                        ],
+                      );
+                    }).toList(),
+                  ),
                 ),
-                subtitle: SelectableText(
-                  "From: ${DateFormat('dd MMM yyyy').format(startDate)}\n"
-                      "To: ${DateFormat('dd MMM yyyy').format(endDate)}\n"
-                      "Reason: ${data['reason'] ?? '-'}\n"
-                      "Status: $status",
-                ),
-                trailing: status == "Pending"
-                    ? Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon:
-                      const Icon(Icons.check, color: Colors.green),
-                      tooltip: "Approve",
-                      onPressed: () =>
-                          _updateLeaveStatus(docs[index].id, "Approved"),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.red),
-                      tooltip: "Reject",
-                      onPressed: () =>
-                          _updateLeaveStatus(docs[index].id, "Rejected"),
-                    ),
-                  ],
-                )
-                    : null,
               ),
+
             );
           },
         );
@@ -349,9 +642,10 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
         Process.start('explorer.exe', [filePath]);
       }
     } catch (e) {
+      print("error1 :   $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("❌ Failed to export: $e"),
-          backgroundColor: Colors.red),
+            backgroundColor: Colors.red),
       );
     }
   }
@@ -383,10 +677,27 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
       }
 
       // 🧠 Fetch leaves
-      final leavesSnapshot = await FirebaseFirestore.instance
+      Query query = FirebaseFirestore.instance
           .collection('leaves')
-          .orderBy('startDate', descending: true)
-          .get();
+          .orderBy('startDate', descending: true);
+
+// Apply date filters
+      if (startDate != null && endDate != null) {
+        query = query
+            .where('startDate', isLessThanOrEqualTo: endDate)
+            .where('endDate', isGreaterThanOrEqualTo: startDate);
+      } else if (startDate != null && endDate == null) {
+        query = query.where('endDate', isGreaterThanOrEqualTo: startDate);
+      } else if (endDate != null && startDate == null) {
+        query = query.where('startDate', isLessThanOrEqualTo: endDate);
+      }
+
+// Apply employee filter if selected
+      if (selectedEmployee != null && selectedEmployee!.isNotEmpty) {
+        query = query.where('userId', isEqualTo: selectedEmployee);
+      }
+
+      final leavesSnapshot = await query.get();
 
       // 🧠 Fetch users
       final usersSnapshot =
@@ -424,7 +735,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
       }
 
       // 📅 Format columns
-      sheet.getRangeByName('C2:D1000').numberFormat = 'dd-mmm-yyyy';
+      sheet.getRangeByName('B2:D1000').numberFormat = 'dd-mmm-yyyy';
       sheet.getRangeByName('G2:G1000').numberFormat = 'dd-mmm-yyyy hh:mm AM/PM';
 
       // 🪄 Auto-fit columns safely
@@ -445,7 +756,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
         downloadsPath = dir.path;
       }
 
-      final filePath = "$downloadsPath\\All_Leaves_Report_.xlsx";
+      final filePath = "$downloadsPath\\All_Leaves_Report.xlsx";
       final file = File(filePath);
 
       try {
@@ -458,8 +769,8 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
       } on FileSystemException {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-                "⚠️ Please close the Excel file before exporting again."),
+              content: Text(
+                  "⚠️ Please close the Excel file before exporting again."),
               backgroundColor: Colors.orange),
         );
         return;
@@ -469,6 +780,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
         Process.start('explorer.exe', [filePath]);
       }
     } catch (e) {
+      //print("error:   $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("❌ Failed to export: $e"),
             backgroundColor: Colors.red),
@@ -507,5 +819,29 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
         ],
       ),
     );
+  }
+
+  void _showReasonDialog(BuildContext context, String reason) {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text("Leave Reason"),
+          content: SingleChildScrollView(
+            child: Text(
+              reason.isNotEmpty ? reason : "No reason provided",
+              style: const TextStyle(fontSize: 15),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Close"),
+            ),
+          ],
+        );
+      },
+    );
+
   }
 }
