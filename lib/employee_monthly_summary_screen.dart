@@ -4,7 +4,11 @@ import 'package:month_picker_dialog/month_picker_dialog.dart';
 import 'package:intl/intl.dart';
 import 'package:excel/excel.dart';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:path_provider/path_provider.dart';
+import 'employee_utils.dart';
+import 'searchable_employee_dropdown.dart';
+import 'attendance_utils.dart';
 
 
 class EmployeeMonthlySummaryScreen extends StatefulWidget {
@@ -34,6 +38,7 @@ class _EmployeeMonthlySummaryScreenState
   int leaveDays = 0;
   int absentDays = 0;
   int autoPunchOutDays = 0;
+  int offSatWorkDays = 0;
   List<Map<String, dynamic>> filteredData = [];
   int totalWorkingDays = 0;
   int workedDays = 0;
@@ -50,6 +55,12 @@ class _EmployeeMonthlySummaryScreenState
         return Colors.orange.shade200;
       case "No Punch-In":
         return Colors.red.shade200;
+      case "Weekend":
+        return Colors.grey.shade300;
+      case "Off-Sat Work":
+        return Colors.teal.shade100;
+      case "Not Employed":
+        return Colors.blueGrey.shade100;
       default:
         return Colors.grey.shade200;
     }
@@ -69,6 +80,13 @@ class _EmployeeMonthlySummaryScreenState
     return emp["name"] ?? "Unknown";
   }
 
+  Map<String, dynamic>? _employeeRecord(String empId) {
+    for (final emp in widget.employees) {
+      if (emp["uid"]?.toString() == empId) return emp;
+    }
+    return null;
+  }
+
   IconData _statusIcon(String status) {
     switch (status) {
       case "All":
@@ -81,6 +99,12 @@ class _EmployeeMonthlySummaryScreenState
         return Icons.cancel;
       case "Auto Punch-Out":
         return Icons.timer_off;
+      case "Weekend":
+        return Icons.weekend;
+      case "Off-Sat Work":
+        return Icons.more_time;
+      case "Not Employed":
+        return Icons.person_off;
       default:
         return Icons.info;
     }
@@ -114,16 +138,16 @@ class _EmployeeMonthlySummaryScreenState
             width: 2,
           ),
         ),
-        child: Container(
-          width: 120,
-          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
 
               Icon(
                 _statusIcon(title),
                 color: color,
-                size: 15,
+                size: 16,
               ),
 
               Text(
@@ -135,8 +159,14 @@ class _EmployeeMonthlySummaryScreenState
                 ),
               ),
 
-
-              Text(title),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+                textAlign: TextAlign.center,
+              ),
 
             ],
           ),
@@ -145,18 +175,105 @@ class _EmployeeMonthlySummaryScreenState
     );
   }
 
-  bool isWorkingSaturday(DateTime day) {
+  List<List<Map<String, dynamic>>> _splitIntoColumns(
+    List<Map<String, dynamic>> data,
+    int columnCount,
+  ) {
+    if (data.isEmpty) return [[]];
+    if (columnCount <= 1) return [data];
 
-    if (day.weekday != DateTime.saturday) return true;
+    final chunkSize = (data.length / columnCount).ceil();
+    final chunks = <List<Map<String, dynamic>>>[];
 
-    int saturdayCount = ((day.day - 1) ~/ 7) + 1;
+    for (int i = 0; i < data.length; i += chunkSize) {
+      chunks.add(
+        data.sublist(i, i + chunkSize > data.length ? data.length : i + chunkSize),
+      );
+    }
 
-    // Only 1st and 3rd Saturday are working
-    return saturdayCount == 1 || saturdayCount == 3;
+    return chunks;
   }
 
+  int _columnCountForHeight(int itemCount, double availableHeight) {
+    const headingHeight = 36.0;
+    const minRowHeight = 28.0;
+
+    for (int columns = 3; columns <= 5; columns++) {
+      final rowsPerColumn = (itemCount / columns).ceil();
+      final neededHeight = headingHeight + rowsPerColumn * minRowHeight;
+      if (neededHeight <= availableHeight) return columns;
+    }
+    return 5;
+  }
+
+  double _rowHeightForLayout(int itemCount, double availableHeight, int columns) {
+    const headingHeight = 36.0;
+    final rowsPerColumn = math.max(1, (itemCount / columns).ceil());
+    return ((availableHeight - headingHeight) / rowsPerColumn).clamp(28.0, 52.0);
+  }
+
+  Widget _buildDayTable(
+    List<Map<String, dynamic>> rows, {
+    required double rowHeight,
+    required bool showEmployee,
+  }) {
+    const headerStyle = TextStyle(fontSize: 13, fontWeight: FontWeight.bold);
+    const cellStyle = TextStyle(fontSize: 13, fontWeight: FontWeight.w600);
+
+    return DataTable(
+      columnSpacing: 12,
+      horizontalMargin: 8,
+      headingRowHeight: rowHeight,
+      dataRowMinHeight: rowHeight,
+      dataRowMaxHeight: rowHeight,
+      columns: [
+        if (showEmployee) const DataColumn(label: Text('Employee', style: headerStyle)),
+        const DataColumn(label: Text('Date', style: headerStyle)),
+        const DataColumn(label: Text('Day', style: headerStyle)),
+        const DataColumn(label: Text('Status', style: headerStyle)),
+        const DataColumn(label: Text('Hours', style: headerStyle)),
+      ],
+      rows: rows.map((row) {
+        final minutes = (row['minutes'] as num?)?.toInt() ?? 0;
+        final status = row['status']?.toString() ?? '';
+
+        return DataRow(
+          cells: [
+            if (showEmployee)
+              DataCell(Text(getEmployeeName(row['employeeId']), style: cellStyle)),
+            DataCell(
+              Text(DateFormat('dd-MMM').format(row['date']), style: cellStyle),
+            ),
+            DataCell(Text(DateFormat('EEE').format(row['date']), style: cellStyle)),
+            DataCell(
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: _statusColor(status),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  status,
+                  style: cellStyle.copyWith(fontSize: 12),
+                ),
+              ),
+            ),
+            DataCell(Text(format(minutes), style: cellStyle)),
+          ],
+        );
+      }).toList(),
+    );
+  }
+
+  double _minutesToDecimalHours(int minutes) =>
+      AttendanceUtils.toDecimalHours(minutes);
+
   String format(int mins) {
-    return "${mins ~/ 60}h ${(mins % 60).toString().padLeft(2, '0')}m";
+    return (mins / 60.0).toStringAsFixed(2);
+  }
+
+  String formatHoursMinutes(int mins) {
+    return '${mins ~/ 60}h ${(mins % 60).toString().padLeft(2, '0')}m';
   }
 
   Widget _infoCard(String title, String value, IconData icon, Color color) {
@@ -183,7 +300,8 @@ class _EmployeeMonthlySummaryScreenState
               Text(
                 title,
                 style: const TextStyle(
-                  fontSize: 10,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
                   color: Colors.grey,
                 ),
               ),
@@ -191,7 +309,7 @@ class _EmployeeMonthlySummaryScreenState
               Text(
                 value,
                 style: TextStyle(
-                  fontSize: 13,
+                  fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: color,
                 ),
@@ -246,42 +364,19 @@ class _EmployeeMonthlySummaryScreenState
 
         String empName = getEmployeeName(empId);
 
-        int empWorkedMinutes = 0;
-        int empLeaveMinutes = 0;
-        int empExpectedMinutes = 0;
-        int empWorkedDays = 0;
-
         for (var row in tableData) {
 
           final date = row["date"] as DateTime;
           final status = row["status"];
           int minutes = (row["minutes"] as num?)?.toInt() ?? 0;
 
-          //double hours = double.parse((minutes / 60).toStringAsFixed(2)); if want in decimal excel hrs then use this.
-
           sheet.appendRow([
             empName,
             DateFormat('dd-MMM-yyyy').format(date),
             DateFormat('EEE').format(date),
             status,
-            format(minutes)
+            _minutesToDecimalHours(minutes),
           ]);
-
-          /// CALCULATE SUMMARY
-          if (status == "Present" || status == "Auto Punch-Out") {
-            empWorkedMinutes += minutes;
-            empWorkedDays++;
-            empExpectedMinutes += 570;
-          }
-
-          if (status == "Leave") {
-            empLeaveMinutes += minutes;
-            empExpectedMinutes += 570;
-          }
-
-          if (status == "No Punch-In") {
-            empExpectedMinutes += 570;
-          }
         }
 
         /// SUMMARY SECTION
@@ -305,7 +400,7 @@ class _EmployeeMonthlySummaryScreenState
           "Expected Hours",
           "",
           "",
-        format(expectedMinutes)
+          formatHoursMinutes(expectedMinutes),
         ]);
         for (int col = 0; col < 5; col++) {
           sheet
@@ -318,7 +413,7 @@ class _EmployeeMonthlySummaryScreenState
           "Worked Hours",
           "",
           "",
-        format(totalMinutes)
+          formatHoursMinutes(totalMinutes),
         ]);
         for (int col = 0; col < 5; col++) {
           sheet
@@ -347,7 +442,7 @@ class _EmployeeMonthlySummaryScreenState
           "Difference",
           "",
           "",
-          "${format(difference.abs())} ${difference > 0 ? "(Short)" : "(Extra)"}"
+          "${formatHoursMinutes(difference.abs())} ${difference > 0 ? "(Short)" : "(Extra)"}"
         ]);
         for (int col = 0; col < 5; col++) {
           sheet
@@ -427,7 +522,14 @@ class _EmployeeMonthlySummaryScreenState
       selectedMonth!.month + 1,
       0,
     );
-    final lastWorkingDay = lastDay;
+    final lastDayEnd = DateTime(
+      lastDay.year,
+      lastDay.month,
+      lastDay.day,
+      23,
+      59,
+      59,
+    );
 
     tableData.clear();
     totalMinutes = 0;
@@ -439,9 +541,10 @@ class _EmployeeMonthlySummaryScreenState
     leaveDays = 0;
     absentDays = 0;
     autoPunchOutDays = 0;
+    offSatWorkDays = 0;
     totalWorkingDays = 0;
 
-    const dailyMinutes = 570; // 9h30m
+    const dailyMinutes = AttendanceUtils.expectedDayMinutes; // 9h per working day
 
     /// FETCH  LEAVES
     Query leaveQuery = FirebaseFirestore.instance.collection("leaves");
@@ -473,7 +576,7 @@ class _EmployeeMonthlySummaryScreenState
 
     query = query
         .where("punchInDate", isGreaterThanOrEqualTo: Timestamp.fromDate(firstDay))
-        .where("punchInDate", isLessThanOrEqualTo: Timestamp.fromDate(lastDay));
+        .where("punchInDate", isLessThanOrEqualTo: Timestamp.fromDate(lastDayEnd));
 
     final snapshot = await query.get();
 
@@ -496,11 +599,8 @@ class _EmployeeMonthlySummaryScreenState
 
       final a = doc.data() as Map<String, dynamic>;
 
-      final ts = a["punchInTime"];
-      if (ts == null) continue;
-
-      final d = (ts as Timestamp).toDate();
-      final recordDate = DateTime(d.year, d.month, d.day);
+      final recordDate = AttendanceUtils.parseRecordDate(a);
+      if (recordDate == null) continue;
 
       final key =
           "${a["userId"]}_${recordDate.year}-${recordDate.month.toString().padLeft(2,'0')}-${recordDate.day.toString().padLeft(2,'0')}";
@@ -513,24 +613,15 @@ class _EmployeeMonthlySummaryScreenState
         ? widget.employees.map((e) => e["uid"].toString()).toList()
         : [selectedUid!];
 
-    /// 3️⃣ Loop Through Each Day
-
+    /// 3️⃣ Loop through each calendar day in the month
     for (DateTime day = firstDay;
-    !day.isAfter(lastWorkingDay);
-    day = day.add(const Duration(days: 1))) {
-
-      /// Skip Sundays
-      if (day.weekday == DateTime.sunday) continue;
-
-      /// Skip 2nd & 4th Saturday
-      if (!isWorkingSaturday(day)) continue;
+        !day.isAfter(lastDay);
+        day = day.add(const Duration(days: 1))) {
 
       final key =
-          "${day.year}-${day.month.toString().padLeft(2,'0')}-${day.day.toString().padLeft(2,'0')}";
+          "${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}";
 
-      /// Company holiday
       if (holidayDates.contains(key)) {
-
         for (var empId in employeeIds) {
           tableData.add({
             "employeeId": empId,
@@ -539,22 +630,57 @@ class _EmployeeMonthlySummaryScreenState
             "minutes": 0,
           });
         }
-
         continue;
       }
 
-      totalWorkingDays++;
-
       for (var empId in employeeIds) {
+        final employee = _employeeRecord(empId) ?? {};
 
-        /// 🔹 RECORD LOOKUP
+        if (!isEmployeeActiveForSummaryDay(employee, day)) {
+          tableData.add({
+            "employeeId": empId,
+            "date": day,
+            "status": "Not Employed",
+            "minutes": 0,
+          });
+          continue;
+        }
+
+        if (isWeekendDayForEmployee(employee, day)) {
+          final record = attendanceMap["${empId}_$key"];
+
+          if (isScheduledOffSaturday(employee, day)) {
+            final offSatMinutes = minutesFromAttendanceRecord(record);
+            if (offSatMinutes != null) {
+              totalMinutes += offSatMinutes;
+              workedDays++;
+
+              tableData.add({
+                "employeeId": empId,
+                "date": day,
+                "status": "Off-Sat Work",
+                "minutes": offSatMinutes,
+              });
+              continue;
+            }
+          }
+
+          tableData.add({
+            "employeeId": empId,
+            "date": day,
+            "status": "Weekend",
+            "minutes": 0,
+          });
+          continue;
+        }
+
+        totalWorkingDays++;
+
         final record = attendanceMap["${empId}_$key"];
 
-        /// 🔹 CHECK LEAVE
         bool isLeaveDay = false;
 
         for (var leave in approvedLeaves) {
-
           if (leave["userId"] != empId) continue;
 
           final s = (leave["startDate"] as Timestamp).toDate();
@@ -569,9 +695,7 @@ class _EmployeeMonthlySummaryScreenState
           }
         }
 
-        /// LEAVE
         if (isLeaveDay) {
-
           leaveDays++;
           totalLeaveMinutes += dailyMinutes;
 
@@ -587,9 +711,7 @@ class _EmployeeMonthlySummaryScreenState
 
         expectedMinutes += dailyMinutes;
 
-        /// ABSENT
-        if (record == null) {
-
+        if (record == null || record['punchOutTime'] == null) {
           absentDays++;
 
           tableData.add({
@@ -598,14 +720,12 @@ class _EmployeeMonthlySummaryScreenState
             "status": "No Punch-In",
             "minutes": 0,
           });
-
         } else {
-
-          final minutes = ((record["totalHours"] ?? 0) as num).toInt();
+          final minutes =
+              AttendanceUtils.parseStoredMinutes(record['totalHours']) ?? 0;
           totalMinutes += minutes;
 
           if (record["autoLogout"] == true) {
-
             autoPunchOutDays++;
             workedDays++;
 
@@ -615,9 +735,7 @@ class _EmployeeMonthlySummaryScreenState
               "status": "Auto Punch-Out",
               "minutes": minutes,
             });
-
           } else {
-
             presentDays++;
             workedDays++;
 
@@ -639,6 +757,9 @@ class _EmployeeMonthlySummaryScreenState
     presentDays =
         tableData.where((r) => r["status"] == "Present").length;
 
+    offSatWorkDays =
+        tableData.where((r) => r["status"] == "Off-Sat Work").length;
+
     leaveDays =
         tableData.where((r) => r["status"] == "Leave").length;
 
@@ -653,21 +774,24 @@ class _EmployeeMonthlySummaryScreenState
 
   @override
   Widget build(BuildContext context) {
-
-    final halfIndex = (filteredData.length / 2).ceil();
-
-    final firstHalf = filteredData.sublist(0, halfIndex);
-    final secondHalf = filteredData.sublist(halfIndex);
+    final isSingleEmployee =
+        selectedUid != null && selectedUid != 'ALL' && selectedMonth != null;
+    final appBarTitle = isSingleEmployee
+        ? '${getEmployeeName(selectedUid)} · ${DateFormat.yMMM().format(selectedMonth!)}'
+        : 'Employee Monthly Summary';
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Employee Monthly Summary"),
+        title: Text(
+          appBarTitle,
+          style: const TextStyle(fontSize: 16),
+        ),
       ),
       body: Stack(
           children: [
 
       Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(12),
         child: Column(
           children: [
 
@@ -683,25 +807,18 @@ class _EmployeeMonthlySummaryScreenState
                     children: [
 
                       Expanded(
-                        child: DropdownButtonFormField<String>(
+                        child: SearchableEmployeeDropdown(
                           value: selectedUid,
-                          hint: const Text("Select Employee"),
-                          items: [
-                            const DropdownMenuItem(
-                              value: "ALL",
-                              child: Text("All Employees"),
-                            ),
-                            ...widget.employees.map<DropdownMenuItem<String>>((emp) {
-                              return DropdownMenuItem(
-                                value: emp["uid"].toString(),
-                                child: Text(emp["name"]),
-                              );
-                            }).toList(),
-                          ],
+                          employees: employeeListToNameMap(
+                            widget.employees.where(isSelectableEmployeeRecord).toList(),
+                          ),
+                          showClearOption: false,
+                          fixedOptionValue: 'ALL',
+                          fixedOptionLabel: 'All Employees',
+                          hint: 'Select Employee',
                           onChanged: (value) async {
-                            setState(() {
-                              selectedUid = value;
-                            });
+                            if (value == null) return;
+                            setState(() => selectedUid = value);
 
                             if (selectedMonth != null) {
                               await _loadSummary();
@@ -710,7 +827,7 @@ class _EmployeeMonthlySummaryScreenState
                         ),
                       ),
 
-                      const SizedBox(width: 20),
+                      const SizedBox(width: 12),
 
                       ElevatedButton(
                         onPressed: () async {
@@ -736,7 +853,7 @@ class _EmployeeMonthlySummaryScreenState
                         ),
                       ),
 
-                      const SizedBox(width: 15),
+                      const SizedBox(width: 12),
 
                       ElevatedButton(
                         onPressed: selectedUid == null ||
@@ -746,7 +863,7 @@ class _EmployeeMonthlySummaryScreenState
                             : _loadSummary,
                         child: const Text("Load"),
                       ),
-                      const SizedBox(width: 20),
+                      const SizedBox(width: 12),
                       if (selectedUid == "ALL")
                       ElevatedButton.icon(
                         icon: const Icon(Icons.download),
@@ -759,10 +876,10 @@ class _EmployeeMonthlySummaryScreenState
                   ),
                 ),
 
-                const SizedBox(width: 30),
+                const SizedBox(width: 16),
 
                 /// RIGHT SIDE : SUMMARY
-                if (selectedUid != null && selectedUid != "ALL")
+                if (isSingleEmployee)
                   Expanded(
                     flex: 3,
                     child: Builder(
@@ -770,46 +887,69 @@ class _EmployeeMonthlySummaryScreenState
 
                         int actualTotal = totalMinutes;
                         int difference = expectedMinutes - actualTotal;
+                        final expectedDayCount = totalWorkingDays - leaveDays;
 
-                        return Wrap(
-                          spacing: 10,
-                          runSpacing: 6,
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 4,
+                              children: [
 
-                            _infoCard(
-                              "Working Days",
-                              "$totalWorkingDays",
-                              Icons.calendar_month,
-                              Colors.blue,
-                            ),
+                                _infoCard(
+                                  "Working Days",
+                                  "$totalWorkingDays",
+                                  Icons.calendar_month,
+                                  Colors.blue,
+                                ),
 
-                            _infoCard(
-                              "Worked Days",
-                              "$workedDays",
-                              Icons.badge,
-                              Colors.green,
-                            ),
+                                _infoCard(
+                                  "Worked Days",
+                                  "$workedDays",
+                                  Icons.badge,
+                                  Colors.green,
+                                ),
 
-                            _infoCard(
-                              "Expected Hours",
-                              format(expectedMinutes),
-                              Icons.schedule,
-                              Colors.orange,
-                            ),
+                                _infoCard(
+                                  "Expected Hours",
+                                  formatHoursMinutes(expectedMinutes),
+                                  Icons.schedule,
+                                  Colors.orange,
+                                ),
 
-                            _infoCard(
-                              "Worked Hours",
-                              format(totalMinutes),
-                              Icons.timer,
-                              Colors.teal,
-                            ),
+                                _infoCard(
+                                  "Worked Hours",
+                                  formatHoursMinutes(totalMinutes),
+                                  Icons.timer,
+                                  Colors.teal,
+                                ),
 
-                            _infoCard(
-                              "Difference",
-                              "${format(difference.abs())} ${difference > 0 ? "Short" : "Extra"}",
-                              Icons.analytics,
-                              difference > 0 ? Colors.red : Colors.green,
+                                _infoCard(
+                                  "Difference",
+                                  "${formatHoursMinutes(difference.abs())} ${difference > 0 ? "Short" : "Extra"}",
+                                  Icons.analytics,
+                                  difference > 0 ? Colors.red : Colors.green,
+                                ),
+                              ],
                             ),
+                            if (expectedDayCount > 0)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4),
+                                child: Tooltip(
+                                  message:
+                                      'Excludes weekends, holidays, leave '
+                                      'and not-employed days',
+                                  child: Text(
+                                    'Expected hours = 9 h × '
+                                    '$expectedDayCount working days',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600,
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         );
                       },
@@ -817,21 +957,26 @@ class _EmployeeMonthlySummaryScreenState
                   ),
               ],
             ),
-            const SizedBox(height: 5),
-            if (selectedUid != "ALL")
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
+            const SizedBox(height: 4),
+            if (selectedUid != "ALL" && selectedUid != null)
+            Row(
               children: [
-                _summaryCard("All", tableData.length, Colors.grey),
-                _summaryCard("Present", presentDays, Colors.green),
-                _summaryCard("Leave", leaveDays, Colors.blue),
-                _summaryCard("No Punch-In", absentDays, Colors.red),
-                _summaryCard("Auto Punch-Out", autoPunchOutDays, Colors.orange),
-
+                Expanded(child: _summaryCard("All", tableData.length, Colors.grey)),
+                Expanded(child: _summaryCard("Present", presentDays, Colors.green)),
+                if (offSatWorkDays > 0)
+                  Expanded(
+                    child: _summaryCard(
+                      "Off-Sat Work",
+                      offSatWorkDays,
+                      Colors.teal,
+                    ),
+                  ),
+                Expanded(child: _summaryCard("Leave", leaveDays, Colors.blue)),
+                Expanded(child: _summaryCard("No Punch-In", absentDays, Colors.red)),
+                Expanded(child: _summaryCard("Auto Punch-Out", autoPunchOutDays, Colors.orange)),
               ],
             ),
-            const SizedBox(height: 5),
+            const SizedBox(height: 4),
             if (selectedUid == "ALL")
               const Padding(
                 padding: EdgeInsets.all(20),
@@ -841,7 +986,7 @@ class _EmployeeMonthlySummaryScreenState
                 ),
               ),
 
-            /// TABLE
+            /// TABLE — fits viewport without scroll (for screenshots)
             if (selectedUid == null)
               const Expanded(
                 child: Center(
@@ -853,107 +998,61 @@ class _EmployeeMonthlySummaryScreenState
               )
             else if (selectedUid != "ALL")
               Expanded(
-                child: Row(
-                  children: [
+                child: filteredData.isEmpty
+                    ? const Center(child: Text('No data for this month'))
+                    : LayoutBuilder(
+                        builder: (context, constraints) {
+                          final columns = _columnCountForHeight(
+                            filteredData.length,
+                            constraints.maxHeight,
+                          );
+                          final rowHeight = _rowHeightForLayout(
+                            filteredData.length,
+                            constraints.maxHeight,
+                            columns,
+                          );
+                          final chunks = _splitIntoColumns(filteredData, columns);
 
-                    /// LEFT TABLE
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: DataTable(
-                          columnSpacing: 18,
-                          headingRowHeight: 36,
-
-                          columns: const [
-                            DataColumn(label: Text("Employee")),
-                            DataColumn(label: Text("Date")),
-                            DataColumn(label: Text("Day")),
-                            DataColumn(label: Text("Status")),
-                            DataColumn(label: Text("Worked Hours")),
-                          ],
-                          rows: firstHalf.map((row) {
-
-                            final minutes = row["minutes"];
-                            final hours = minutes ~/ 60;
-                            final mins = minutes % 60;
-
-                            return DataRow(
-                              cells: [
-
-                                DataCell(Text(getEmployeeName(row["employeeId"]))),
-
-                                DataCell(Text(
-                                    DateFormat('dd-MMM-yyyy').format(row["date"]))),
-
-                                DataCell(Text(
-                                    DateFormat('EEE').format(row["date"]))),
-
-                                DataCell(
-                                  Chip(
-                                    label: Text(row["status"]),
-                                    backgroundColor: _statusColor(row["status"]),
+                          final tableRow = Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              for (int i = 0; i < chunks.length; i++) ...[
+                                if (i > 0)
+                                  VerticalDivider(
+                                    width: 20,
+                                    thickness: 2,
+                                    color: Colors.grey.shade400,
+                                  ),
+                                Expanded(
+                                  child: _buildDayTable(
+                                    chunks[i],
+                                    rowHeight: rowHeight,
+                                    showEmployee: false,
                                   ),
                                 ),
-
-                                DataCell(Text(
-                                    "$hours h ${mins.toString().padLeft(2, '0')} m")),
                               ],
+                            ],
+                          );
+
+                          final rowsPerColumn =
+                              math.max(1, (filteredData.length / columns).ceil());
+                          final neededHeight = 36.0 + rowsPerColumn * rowHeight;
+
+                          if (neededHeight > constraints.maxHeight) {
+                            return FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.topCenter,
+                              child: SizedBox(
+                                width: constraints.maxWidth,
+                                height: neededHeight,
+                                child: tableRow,
+                              ),
                             );
+                          }
 
-                          }).toList(),
-                        ),
+                          return tableRow;
+                        },
                       ),
-                    ),
-
-                    const SizedBox(width: 10),
-
-                    /// RIGHT TABLE
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: DataTable(
-                          columnSpacing: 18,
-                          headingRowHeight: 36,
-                          columns: const [
-                            DataColumn(label: Text("Employee")),
-                            DataColumn(label: Text("Date")),
-                            DataColumn(label: Text("Day")),
-                            DataColumn(label: Text("Status")),
-                            DataColumn(label: Text("Worked Hours")),
-                          ],
-                          rows: secondHalf.map((row) {
-
-                            final minutes = row["minutes"];
-                            final hours = minutes ~/ 60;
-                            final mins = minutes % 60;
-
-                            return DataRow(
-                              cells: [
-
-                                DataCell(Text(getEmployeeName(row["employeeId"]))),
-
-                                DataCell(Text(
-                                    DateFormat('dd-MMM-yyyy').format(row["date"]))),
-
-                                DataCell(Text(
-                                    DateFormat('EEE').format(row["date"]))),
-
-                                DataCell(
-                                  Chip(
-                                    label: Text(row["status"]),
-                                    backgroundColor: _statusColor(row["status"]),
-                                  ),
-                                ),
-
-                                DataCell(Text(
-                                    "$hours h ${mins.toString().padLeft(2, '0')} m")),
-                              ],
-                            );
-
-                          }).toList(),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
               ),
           ],
         ),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:intl/intl.dart';
+import 'employee_utils.dart';
 
 class HolidayCalendarDialog extends StatefulWidget {
   const HolidayCalendarDialog({Key? key}) : super(key: key);
@@ -27,17 +28,8 @@ class _HolidayCalendarDialogState extends State<HolidayCalendarDialog> {
     _loadLeaves();
   }
   Future<void> _loadUsers() async {
-    final snapshot =
-    await FirebaseFirestore.instance.collection('users').get();
-
-    final Map<String, String> temp = {};
-
-    for (final doc in snapshot.docs) {
-      final data = doc.data();
-      temp[doc.id] = data['name'] ?? 'Unknown';
-    }
-
-    setState(() => _userNames = temp);
+    _userNames = await fetchAllEmployeeNameMap();
+    if (mounted) setState(() {});
   }
   Future<void> _loadLeaves() async {
     final snapshot = await FirebaseFirestore.instance

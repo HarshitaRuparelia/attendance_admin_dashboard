@@ -1,7 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-
+import 'data_retention_utils.dart';
+import 'employee_utils.dart';
+import 'searchable_employee_dropdown.dart';
 class UserLogsScreen extends StatefulWidget {
   const UserLogsScreen({super.key});
 
@@ -12,10 +14,25 @@ class UserLogsScreen extends StatefulWidget {
 class _UserLogsScreenState extends State<UserLogsScreen> {
   String? selectedUid;
   bool showLogs = false;
+  Map<String, String> _employees = {};
 
   DateTime? startDate;
   DateTime? endDate;
   bool _isDeleting = false;
+  bool _isBulkCleaning = false;
+  String _bulkCleanupStatus = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadEmployees();
+  }
+
+  Future<void> _loadEmployees() async {
+    final employees = await fetchActiveEmployeeNameMap();
+    if (!mounted) return;
+    setState(() => _employees = employees);
+  }
 
   // ---------------- DATE PICKER ----------------
   Future<void> _pickDateRange() async {
@@ -135,6 +152,86 @@ class _UserLogsScreenState extends State<UserLogsScreen> {
     }
   }
 
+  Future<void> _confirmBulkRetentionCleanup() async {
+    final keepLabel = retentionKeepLabel();
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Bulk cleanup (all users)'),
+        content: Text(
+          'Delete logs and attendance selfies for ALL users except:\n\n'
+          '• $keepLabel\n\n'
+          'Attendance records are kept; only selfie files and URLs are removed '
+          'for older months.\n\n'
+          'Stay on this screen until cleanup finishes — do not press Back.\n\n'
+          'This cannot be undone. Continue?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete old data'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) return;
+
+    setState(() {
+      _isBulkCleaning = true;
+      _bulkCleanupStatus = 'Starting cleanup...';
+    });
+
+    try {
+      final result = await cleanupLogsAndSelfiesOutsideRetention(
+        onProgress: (stage, count) {
+          if (!mounted) return;
+          setState(() {
+            _bulkCleanupStatus = stage == 'logs'
+                ? 'Deleting logs... ($count so far)'
+                : 'Deleting selfies... ($count files so far)';
+          });
+        },
+      );
+
+      if (!mounted) return;
+      final errorNote = result.errors.isEmpty
+          ? ''
+          : '\n${result.errors.length} warnings — check console.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Done. Logs deleted: ${result.logsDeleted}, '
+            'selfies deleted: ${result.selfiesDeleted}, '
+            'attendance rows updated: ${result.attendanceUpdated}.$errorNote',
+          ),
+          duration: const Duration(seconds: 6),
+        ),
+      );
+      for (final err in result.errors.take(5)) {
+        debugPrint('Retention cleanup: $err');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Bulk cleanup failed: $e')),
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _isBulkCleaning = false;
+        _bulkCleanupStatus = '';
+        showLogs = false;
+      });
+    }
+  }
+
 
   // ---------------- LOG STREAM ----------------
   Stream<QuerySnapshot> _logsStream() {
@@ -169,9 +266,48 @@ class _UserLogsScreenState extends State<UserLogsScreen> {
     return query.snapshots();
   }
 
+  Future<bool> _onBackDuringCleanup() async {
+    if (!_isBulkCleaning && !_isDeleting) return true;
+
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cleanup in progress'),
+        content: const Text(
+          'Deletion is still running. If you leave now:\n\n'
+          '• Some old logs/selfies may already be deleted\n'
+          '• The rest may not be deleted\n'
+          '• You will not see the final summary\n\n'
+          'Wait on this screen until it finishes.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Stay'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Leave anyway'),
+          ),
+        ],
+      ),
+    );
+    return leave == true;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      canPop: !_isBulkCleaning && !_isDeleting,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        final shouldLeave = await _onBackDuringCleanup();
+        if (shouldLeave && context.mounted) {
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text("User Activity Logs"),
         actions: [
@@ -213,22 +349,28 @@ class _UserLogsScreenState extends State<UserLogsScreen> {
           ),
 
           // 🔴 FULL SCREEN LOADER WHEN DELETING
-          if (_isDeleting)
+          if (_isDeleting || _isBulkCleaning)
             Container(
-              color: Colors.black.withOpacity(0.4),
-              child: const Center(
+              color: Colors.black.withValues(alpha: 0.4),
+              child: Center(
                 child: Card(
                   elevation: 8,
                   child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 24,
+                    ),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 20),
+                        const CircularProgressIndicator(),
+                        const SizedBox(height: 20),
                         Text(
-                          "Deleting logs...",
-                          style: TextStyle(
+                          _isBulkCleaning
+                              ? '$_bulkCleanupStatus\n\nDo not press Back.'
+                              : 'Deleting logs...\n\nDo not press Back.',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w500,
                           ),
@@ -241,6 +383,7 @@ class _UserLogsScreenState extends State<UserLogsScreen> {
             ),
         ],
       ),
+      ),
     );
   }
 
@@ -249,7 +392,51 @@ class _UserLogsScreenState extends State<UserLogsScreen> {
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          Card(
+            color: Colors.red.shade50,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Bulk cleanup (all users)',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Keeps only ${retentionKeepLabel()}. '
+                    'Deletes older logs and attendance selfies for everyone.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade800,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.cleaning_services),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red.shade700,
+                        foregroundColor: Colors.white,
+                      ),
+                      onPressed: _isDeleting || _isBulkCleaning
+                          ? null
+                          : _confirmBulkRetentionCleanup,
+                      label: const Text('Delete old logs & selfies'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
           _buildUserDropdown(),
           const SizedBox(height: 12),
           Row(
@@ -295,55 +482,22 @@ class _UserLogsScreenState extends State<UserLogsScreen> {
 
   // ---------------- USERS DROPDOWN ----------------
   Widget _buildUserDropdown() {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('users')
-          .orderBy('name')
-          .snapshots(),
-      builder:  (context, snapshot) {
-        if (!snapshot.hasData) {
-          return const LinearProgressIndicator();
-        }
+    if (_employees.isEmpty) {
+      return const LinearProgressIndicator();
+    }
 
-        final docs = snapshot.data!.docs.toList();
-
-        // ✅ Sort alphabetically ignoring case
-        docs.sort((a, b) {
-          final nameA =
-              (a.data() as Map<String, dynamic>)['name']
-                  ?.toString()
-                  .toLowerCase() ?? '';
-          final nameB =
-              (b.data() as Map<String, dynamic>)['name']
-                  ?.toString()
-                  .toLowerCase() ?? '';
-          return nameA.compareTo(nameB);
+    return SearchableEmployeeDropdown(
+      value: selectedUid,
+      employees: _employees,
+      showClearOption: false,
+      hint: 'Select User',
+      labelText: 'Select User',
+      onChanged: (value) {
+        setState(() {
+          selectedUid = value;
+          showLogs = false;
         });
-
-        return DropdownButtonFormField<String>(
-          value: selectedUid,
-          decoration: const InputDecoration(
-            labelText: "Select User",
-            border: OutlineInputBorder(),
-          ),
-          items: docs.map((doc) {
-            final data = doc.data() as Map<String, dynamic>;
-            return DropdownMenuItem<String>(
-              value: data['uid'],
-              child: Text(
-                "${data['name']} (${data['email']})",
-                overflow: TextOverflow.ellipsis,
-              ),
-            );
-          }).toList(),
-          onChanged: (value) {
-            setState(() {
-              selectedUid = value;
-              showLogs = false;
-            });
-          },
-        );
-      }
+      },
     );
   }
 

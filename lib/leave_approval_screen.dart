@@ -9,6 +9,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'dart:io';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'employee_utils.dart';
+import 'searchable_employee_dropdown.dart';
+import 'leave_utils.dart';
 
 class LeaveApprovalScreen extends StatefulWidget {
   const LeaveApprovalScreen({super.key});
@@ -20,53 +23,89 @@ class LeaveApprovalScreen extends StatefulWidget {
 class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
-  Map<String, String> employees = {}; // userId → name
+  Map<String, String> employees = {}; // active employees for filter
+  Map<String, String> _employeeNameLookup = {}; // all employees for display
   String? selectedEmployee;
   DateTime? startDate;
   DateTime? endDate;
+  bool _explicitDateFilter = false;
+
+  DateTimeRange _currentMonthRange([DateTime? reference]) {
+    final now = reference ?? DateTime.now();
+    return DateTimeRange(
+      start: DateTime(now.year, now.month, 1),
+      end: DateTime(now.year, now.month + 1, 0),
+    );
+  }
+
+  bool get _isPendingTab => _tabController.index == 0;
+
+  DateTime? _dateFilterStartForStatus(String status) {
+    if (_explicitDateFilter) return startDate;
+    if (status == 'Pending') return null;
+    return _currentMonthRange().start;
+  }
+
+  DateTime? _dateFilterEndForStatus(String status) {
+    if (_explicitDateFilter) return endDate;
+    if (status == 'Pending') return null;
+    return _currentMonthRange().end;
+  }
+
+  DateTime? get _effectiveStartDate =>
+      _dateFilterStartForStatus(
+        _isPendingTab ? 'Pending' : _tabController.index == 1 ? 'Approved' : 'Rejected',
+      );
+
+  DateTime? get _effectiveEndDate =>
+      _dateFilterEndForStatus(
+        _isPendingTab ? 'Pending' : _tabController.index == 1 ? 'Approved' : 'Rejected',
+      );
+
+  String get _dateRangeLabel {
+    if (_explicitDateFilter && startDate != null && endDate != null) {
+      return '${DateFormat('dd MMM').format(startDate!)} - '
+          '${DateFormat('dd MMM yyyy').format(endDate!)}';
+    }
+    if (_isPendingTab) return 'All dates';
+    final range = _currentMonthRange();
+    return '${DateFormat('dd MMM').format(range.start)} - '
+        '${DateFormat('dd MMM yyyy').format(range.end)}';
+  }
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _tabController.addListener(() {
+      if (_tabController.indexIsChanging) return;
+      setState(() {});
+    });
     _fetchEmployees();
   }
 
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
   Future<void> _fetchEmployees() async {
-    final snapshot = await FirebaseFirestore.instance.collection('users').get();
+    final active = await fetchActiveEmployeeNameMap();
+    final allNames = await fetchAllEmployeeNameMap();
+    if (!mounted) return;
     setState(() {
-      employees = {
-        for (var doc in snapshot.docs)
-          (doc.id): (doc['name'] ?? 'Unknown').toString()
-      };
+      employees = active;
+      _employeeNameLookup = allNames;
     });
   }
 
   Stream<QuerySnapshot> _getLeaveStream(String status) {
-    Query query = FirebaseFirestore.instance.collection('leaves');
-
-    // Status filter (always applied)
-    query = query.where('status', isEqualTo: status);
-
-    // Employee filter (optional)
-    if (selectedEmployee != null && selectedEmployee!.isNotEmpty) {
-      query = query.where('userId', isEqualTo: selectedEmployee);
-    }
-
-    // Date filter (partial-friendly)
-    if (startDate != null && endDate != null) {
-      query = query
-          .where('startDate', isLessThanOrEqualTo: endDate)
-          .where('endDate', isGreaterThanOrEqualTo: startDate);
-    } else if (startDate != null && endDate == null) {
-      // Show leaves starting or ending after startDate
-      query = query.where('endDate', isGreaterThanOrEqualTo: startDate);
-    } else if (endDate != null && startDate == null) {
-      // Show leaves starting before endDate
-      query = query.where('startDate', isLessThanOrEqualTo: endDate);
-    }
-
-    return query.orderBy('startDate', descending: true).snapshots();
+    // Status filter only — date/employee/sort handled client-side to avoid composite indexes.
+    return FirebaseFirestore.instance
+        .collection('leaves')
+        .where('status', isEqualTo: status)
+        .snapshots();
   }
 
 
@@ -85,6 +124,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
       setState(() {
         startDate = picked.start;
         endDate = picked.end;
+        _explicitDateFilter = true;
       });
     }
   }
@@ -290,11 +330,42 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
           return const Center(child: CircularProgressIndicator());
         }
 
-        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-          return Center(child: Text("No $status leaves found"));
+        if (snapshot.hasError) {
+          debugPrint('LeaveApprovalScreen stream error: ${snapshot.error}');
+          return Center(
+            child: Text('Error loading leaves: ${snapshot.error}'),
+          );
         }
 
-        final docs = snapshot.data!.docs;
+        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+          return Center(
+            child: Text('No $status leaves found for $_dateRangeLabel'),
+          );
+        }
+
+        final filterStart = _dateFilterStartForStatus(status);
+        final filterEnd = _dateFilterEndForStatus(status);
+
+        final docs = snapshot.data!.docs.where((doc) {
+          final data = doc.data() as Map<String, dynamic>;
+          if (selectedEmployee != null &&
+              selectedEmployee!.isNotEmpty &&
+              data['userId'] != selectedEmployee) {
+            return false;
+          }
+          return leaveMatchesDateFilter(
+            data,
+            filterStart: filterStart,
+            filterEnd: filterEnd,
+          );
+        }).toList()
+          ..sort(compareLeavesByStartDateDesc);
+
+        if (docs.isEmpty) {
+          return Center(
+            child: Text('No $status leaves found for $_dateRangeLabel'),
+          );
+        }
 
         return LayoutBuilder(
           builder: (context, constraints) {
@@ -327,7 +398,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
                       final data = doc.data() as Map<String, dynamic>;
 
                       final userId = data['userId'] ?? '';
-                      final name = employees[userId] ?? 'Unknown';
+                      final name = _employeeNameLookup[userId] ?? 'Unknown';
 
                       final startDate =
                       (data['startDate'] as Timestamp).toDate();
@@ -458,69 +529,140 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
     );
   }
 
+  Future<void> _approveAllLeaves() async {
+    try {
+      // 1. Show a confirmation dialog
+      bool confirm = await showDialog(
+        context: context,
+        builder: (context) =>
+            AlertDialog(
+              title: const Text("Approve All"),
+              content: const Text(
+                  "Are you sure you want to approve all pending leave requests?"),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false),
+                    child: const Text("Cancel")),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green),
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text("Approve All"),
+                ),
+              ],
+            ),
+      ) ?? false;
+
+      if (!confirm) return;
+
+      // 2. Fetch all pending leaves
+      final querySnapshot = await FirebaseFirestore.instance
+          .collection('leaves')
+          .where('status', isEqualTo: 'Pending')
+          .get();
+
+      if (querySnapshot.docs.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("No pending leaves found.")),
+        );
+        return;
+      }
+
+      // 3. Use a Batch Write to update all at once
+      final batch = FirebaseFirestore.instance.batch();
+      for (var doc in querySnapshot.docs) {
+        batch.update(doc.reference, {'status': 'Approved'});
+      }
+
+      await batch.commit();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(
+            "Successfully approved ${querySnapshot.docs.length} leaves.")),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error: $e")),
+      );
+    }
+  }
   Widget _buildFilters() {
     return Padding(
       padding: const EdgeInsets.all(8.0),
-      child: Wrap(
-        alignment: WrapAlignment.center,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        spacing: 12,
-        runSpacing: 8,
+      child: Column(
         children: [
-          SizedBox(
-            width: 250,
-            child: DropdownButtonFormField<String>(
-              value: selectedEmployee,
-              hint: const Text("Select Employee"),
-              items: employees.entries
-                  .map((e) => DropdownMenuItem(
-                value: e.key,
-                child: Text(e.value),
-              ))
-                  .toList(),
-              onChanged: (value) {
-                setState(() {
-                  selectedEmployee = value;
-                });
-              },
+          Wrap(
+            alignment: WrapAlignment.center,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              if (_isPendingTab)
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green.shade700,
+                    foregroundColor: Colors.white,
+                  ),
+                  icon: const Icon(Icons.done_all),
+                  label: const Text('Approve All Pending'),
+                  onPressed: _approveAllLeaves,
+                ),
+              SizedBox(
+                width: 280,
+                child: SearchableEmployeeDropdown(
+                  value: selectedEmployee,
+                  employees: employees,
+                  onChanged: (value) {
+                    setState(() => selectedEmployee = value);
+                  },
+                ),
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.date_range),
+                label: Text(_dateRangeLabel),
+                onPressed: () => _selectDateRange(context),
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.clear),
+                onPressed: () {
+                  setState(() {
+                    startDate = null;
+                    endDate = null;
+                    selectedEmployee = null;
+                    _explicitDateFilter = false;
+                  });
+                },
+                label: const Text('Clear Filters'),
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.download_for_offline),
+                label: const Text('Export to Excel'),
+                onPressed: () {
+                  final status = _isPendingTab
+                      ? 'Pending'
+                      : _tabController.index == 1
+                          ? 'Approved'
+                          : 'Rejected';
+                  _exportToExcel(status);
+                },
+              ),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.download_for_offline),
+                label: const Text('Export All'),
+                onPressed: _exportAllLeavesToExcel,
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              _isPendingTab && !_explicitDateFilter
+                  ? 'Showing all pending leaves'
+                  : 'Showing leaves for $_dateRangeLabel',
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Colors.black54,
+              ),
             ),
-          ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.date_range),
-            label: Text(
-              startDate == null || endDate == null
-                  ? "Select Date Range"
-                  : "${DateFormat('dd MMM').format(startDate!)} - ${DateFormat('dd MMM yyyy').format(endDate!)}",
-            ),
-            onPressed: () => _selectDateRange(context),
-          ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.clear),
-            onPressed: () {
-              setState(() {
-                startDate = null;
-                endDate = null;
-                selectedEmployee = null;
-              });
-            },
-            label: const Text("Clear Filters"),
-          ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.download_for_offline),
-            label: const Text("Export to Excel"),
-            onPressed: () {
-              final status = _tabController.index == 0
-                  ? "Pending"
-                  : _tabController.index == 1
-                  ? "Approved"
-                  : "Rejected";
-              _exportToExcel(status);
-            },
-          ),
-          ElevatedButton.icon(
-            icon: const Icon(Icons.download_for_offline),
-            label: const Text("Export All"),
-            onPressed: _exportAllLeavesToExcel,
           ),
         ],
       ),
@@ -561,14 +703,17 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
         query = query.where('userId', isEqualTo: selectedEmployee);
       }
 
-      if (startDate != null && endDate != null) {
+      final filterStart = _dateFilterStartForStatus(status);
+      final filterEnd = _dateFilterEndForStatus(status);
+
+      if (filterStart != null && filterEnd != null) {
         query = query
-            .where('startDate', isLessThanOrEqualTo: endDate)
-            .where('endDate', isGreaterThanOrEqualTo: startDate);
-      } else if (startDate != null && endDate == null) {
-        query = query.where('endDate', isGreaterThanOrEqualTo: startDate);
-      } else if (endDate != null && startDate == null) {
-        query = query.where('startDate', isLessThanOrEqualTo: endDate);
+            .where('startDate', isLessThanOrEqualTo: filterEnd)
+            .where('endDate', isGreaterThanOrEqualTo: filterStart);
+      } else if (filterStart != null) {
+        query = query.where('endDate', isGreaterThanOrEqualTo: filterStart);
+      } else if (filterEnd != null) {
+        query = query.where('startDate', isLessThanOrEqualTo: filterEnd);
       }
 
       final snapshot = await query.get();
@@ -577,7 +722,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
       for (int i = 0; i < snapshot.docs.length; i++) {
         final data = snapshot.docs[i].data() as Map<String, dynamic>;
 
-        final name = employees[data['userId']] ?? 'Unknown';
+        final name = _employeeNameLookup[data['userId']] ?? 'Unknown';
         final userId = data['userId'] ?? '-';
         final start = (data['startDate'] as Timestamp?)?.toDate();
         final end = (data['endDate'] as Timestamp?)?.toDate() ?? start;
@@ -682,14 +827,21 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
           .orderBy('startDate', descending: true);
 
 // Apply date filters
-      if (startDate != null && endDate != null) {
+      final filterStart = _isPendingTab && !_explicitDateFilter
+          ? null
+          : _effectiveStartDate;
+      final filterEnd = _isPendingTab && !_explicitDateFilter
+          ? null
+          : _effectiveEndDate;
+
+      if (filterStart != null && filterEnd != null) {
         query = query
-            .where('startDate', isLessThanOrEqualTo: endDate)
-            .where('endDate', isGreaterThanOrEqualTo: startDate);
-      } else if (startDate != null && endDate == null) {
-        query = query.where('endDate', isGreaterThanOrEqualTo: startDate);
-      } else if (endDate != null && startDate == null) {
-        query = query.where('startDate', isLessThanOrEqualTo: endDate);
+            .where('startDate', isLessThanOrEqualTo: filterEnd)
+            .where('endDate', isGreaterThanOrEqualTo: filterStart);
+      } else if (filterStart != null) {
+        query = query.where('endDate', isGreaterThanOrEqualTo: filterStart);
+      } else if (filterEnd != null) {
+        query = query.where('startDate', isLessThanOrEqualTo: filterEnd);
       }
 
 // Apply employee filter if selected
@@ -700,13 +852,7 @@ class _LeaveApprovalScreenState extends State<LeaveApprovalScreen>
       final leavesSnapshot = await query.get();
 
       // 🧠 Fetch users
-      final usersSnapshot =
-      await FirebaseFirestore.instance.collection('users').get();
-
-      final userMap = {
-        for (var u in usersSnapshot.docs)
-          u.id: (u.data() as Map<String, dynamic>)['name'] ?? 'Unknown'
-      };
+      final userMap = await fetchAllEmployeeNameMap();
 
       // 📝 Write rows
       for (int i = 0; i < leavesSnapshot.docs.length; i++) {

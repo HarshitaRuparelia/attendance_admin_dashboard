@@ -6,11 +6,18 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'employee_monthly_summary_screen.dart';
 import 'leave_approval_screen.dart';
+import 'ope_claim_approval_screen.dart';
+import 'employee_management_screen.dart';
+import 'leave_balance_screen.dart';
 import 'holiday_calendar_dialog.dart';
 import 'package:rxdart/rxdart.dart';
 import 'package:data_table_2/data_table_2.dart';
 
 import 'user_logs_screen.dart';
+import 'clock_hours_screen.dart';
+import 'employee_utils.dart';
+import 'searchable_employee_dropdown.dart';
+import 'attendance_utils.dart';
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -21,6 +28,7 @@ class AdminDashboard extends StatefulWidget {
 
 class _AdminDashboardState extends State<AdminDashboard> {
   List<Map<String, dynamic>> employees = [];
+  Map<String, Map<String, dynamic>> _employeeLookup = {};
   String? selectedEmployee;
   DateTime? startDate;
   DateTime? endDate;
@@ -31,6 +39,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
   bool sortAscending = true;
   int? sortColumnIndex;
   List<Map<String, dynamic>> _sortedRecords = [];
+  static const int _rowsPerPage = 100;
+  int _tablePage = 0;
 
   @override
   void initState() {
@@ -46,7 +56,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
       bool ascending, {
         bool sortAllTypes = false,
         bool silent = false, // 👈 ADD THIS
-      }) {
+      })
+  {
     if (!sortAllTypes) {
       final attendanceRecords =
       _sortedRecords.where((e) => e["type"] == "attendance").toList();
@@ -77,6 +88,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       setState(() {
         sortColumnIndex = columnIndex;
         sortAscending = ascending;
+        _tablePage = 0;
       });
     }
   }
@@ -115,38 +127,30 @@ class _AdminDashboardState extends State<AdminDashboard> {
         .map((l) => l["userId"])
         .toSet();
 
-    return employees
-        .where((emp) =>
-    !punchedInUserIds.contains(emp["uid"]) &&
-        !leaveUserIds.contains(emp["uid"]))
-        .toList();
+    return employees.where((emp) {
+      if (!isEmployeeVisibleOnDate(emp, selectedDate)) return false;
+
+      return !punchedInUserIds.contains(emp["uid"]) &&
+          !leaveUserIds.contains(emp["uid"]);
+    }).toList();
   }
 
 
   Future<void> _fetchEmployeeNames() async {
     try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('users')
-          .where('isTestUser', isEqualTo: false)
-          .get();
-
-      final list = snapshot.docs.map((doc) {
-        final data = doc.data();
-        return {
-          "uid": data["uid"]?.toString() ?? doc.id,
-          "name": data["name"]?.toString() ?? "Unknown",
-        };
-      }).toList();
-      list.sort((a, b) =>
-          a["name"].toString().toLowerCase()
-              .compareTo(b["name"].toString().toLowerCase()));
-
+      final all = await fetchAllEmployees();
+      if (!mounted) return;
       setState(() {
-        employees = List<Map<String, dynamic>>.from(list);
+        _employeeLookup = buildEmployeeLookup(all);
+        employees = all.where(isSelectableEmployeeRecord).toList();
       });
     } catch (e) {
       print("Error fetching employees: $e");
     }
+  }
+
+  Map<String, dynamic> _lookupEmployee(String userId) {
+    return lookupEmployeeRecord(userId, _employeeLookup);
   }
 
   Future<void> _selectDateRange(BuildContext context) async {
@@ -162,6 +166,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       setState(() {
         startDate = picked.start;
         endDate = picked.end;
+        _tablePage = 0;
       });
     }
   }
@@ -224,10 +229,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 return "ZZZZ"; // push holidays to bottom
               }
 
-              final employee = employees.firstWhere(
-                    (e) => e["uid"] == d["userId"],
-                orElse: () => {"name": ""},
-              );
+              final employee = _lookupEmployee(d['userId']?.toString() ?? '');
 
               return employee["name"].toString().toLowerCase();
             },
@@ -303,18 +305,94 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
-  double calculateTotalHours(List<Map<String, dynamic>> attendance) {
-    int totalMinutes = 0;
+  Future<void> _confirmDeleteAttendance(Map<String, dynamic> data) async {
+    final employee = _lookupEmployee(data['userId']?.toString() ?? '');
+    final name = employee['name']?.toString() ?? 'Unknown';
+    final punchIn = (data['punchInTime'] as Timestamp?)?.toDate();
+    final punchOut = (data['punchOutTime'] as Timestamp?)?.toDate();
+    final totalMinutes =
+        AttendanceUtils.parseStoredMinutes(data['totalHours']) ?? 0;
+    final recordId = data['id']?.toString();
 
-    for (final a in attendance) {
-      final minutes = a['totalHours'];
-      if (minutes is int && minutes > 0) {
-        totalMinutes += minutes;
-      }
+    if (recordId == null || recordId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cannot delete: record id missing')),
+      );
+      return;
     }
 
-    // Convert minutes → hours (2 decimal places)
-    return double.parse((totalMinutes / 60).toStringAsFixed(2));
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete duplicate attendance?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Employee: $name'),
+            if (punchIn != null)
+              Text('Punch in: ${DateFormat('dd MMM yyyy, hh:mm a').format(punchIn)}'),
+            if (punchOut != null)
+              Text('Punch out: ${DateFormat('dd MMM yyyy, hh:mm a').format(punchOut)}'),
+            Text('Hours: ${AttendanceUtils.formatMinutes(totalMinutes)}'),
+            const SizedBox(height: 12),
+            const Text(
+              'This removes only the selected entry. The other duplicate '
+              'for this day will remain.',
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('attendance')
+          .doc(recordId)
+          .delete();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Deleted attendance entry for $name')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')),
+      );
+    }
+  }
+
+  String calculateTotalHours(
+    List<Map<String, dynamic>> attendance,
+    List<Map<String, dynamic>> leaves,
+    List<Map<String, dynamic>> holidays,
+  ) {
+    if (startDate == null || endDate == null) {
+      return formatHoursMinutes(0);
+    }
+
+    return calculateWorkedHoursTextInRange(
+      rangeStart: startDate!,
+      rangeEnd: endDate!,
+      attendanceRecords: attendance,
+      leaveRecords: leaves,
+      holidayDateKeys: buildHolidayDateKeys(holidays),
+      employeeLookup: _employeeLookup,
+      userId: selectedEmployee,
+    );
   }
 
 
@@ -337,6 +415,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final leaveStream = FirebaseFirestore.instance
         .collection("leaves")
         .where("startDate", isLessThanOrEqualTo: Timestamp.fromDate(end))
+        .where("endDate", isGreaterThanOrEqualTo: Timestamp.fromDate(start))
         .snapshots();
 
     // --- HOLIDAYS inside range ---
@@ -368,10 +447,17 @@ class _AdminDashboardState extends State<AdminDashboard> {
           return data;
         }).where((rec) {
           final punchIn = (rec["punchInTime"] as Timestamp?)?.toDate();
-          final punchOut = (rec["punchOutTime"] as Timestamp?)?.toDate() ??
-              punchIn;
+          final punchOut = (rec["punchOutTime"] as Timestamp?)?.toDate() ?? punchIn;
 
           if (punchIn == null) return false;
+
+          // 👇 FIND employee (include resigned for date visibility checks)
+          final emp = _lookupEmployee(rec['userId']?.toString() ?? '');
+
+          if (!isEmployeeVisibleOnDate(emp, punchIn)) {
+            return false;
+          }
+
           return overlaps(punchIn, punchOut!);
         }).toList();
 
@@ -386,7 +472,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
         }).where((leave) {
           final s = (leave["startDate"] as Timestamp).toDate();
           final e = (leave["endDate"] as Timestamp).toDate();
-          return !s.isAfter(end) && !e.isBefore(start); // ✅ inclusive check
+
+          // 👇 FIND employee (include resigned for date visibility checks)
+          final emp = _lookupEmployee(leave['userId']?.toString() ?? '');
+
+          if (!isEmployeeVisibleOnDate(emp, s)) return false;
+
+          return !s.isAfter(end) && !e.isBefore(start);
         }).toList();
 
 
@@ -435,13 +527,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
     return true;
   }
-
   Future<void> _exportToExcel(List<Map<String, dynamic>> attendance,
       List<Map<String, dynamic>> leaves,
       List<Map<String, dynamic>> holidays,) async {
     try {
       final excel = Excel.createExcel();
       final sheet = excel['Sheet1'];
+      final holidayDateKeys = buildHolidayDateKeys(holidays);
+
+      final attendanceForExport = selectedEmployee != null &&
+              selectedEmployee!.isNotEmpty &&
+              startDate != null &&
+              endDate != null
+          ? listWorkedAttendanceRecordsInRange(
+              userId: selectedEmployee!,
+              employee: _lookupEmployee(selectedEmployee!),
+              rangeStart: startDate!,
+              rangeEnd: endDate!,
+              attendanceRecords: attendance,
+              leaveRecords: leaves,
+              holidayDateKeys: holidayDateKeys,
+            )
+          : attendance;
 
       sheet.appendRow([
         'Employee',
@@ -460,21 +567,22 @@ class _AdminDashboardState extends State<AdminDashboard> {
         'Leave/Holiday Name',
       ]);
 
-      for (var record in attendance) {
-        final employee = employees.firstWhere(
-              (e) => e["uid"] == record["userId"],
-          orElse: () => {"name": "Unknown"},
-        );
+      for (var record in attendanceForExport) {
+        final employee = _lookupEmployee(record['userId']?.toString() ?? '');
 
         final punchInTime = (record["punchInTime"] as Timestamp?)?.toDate();
+        if (punchInTime != null &&
+            !isEmployeeVisibleOnDate(employee, punchInTime)) {
+          continue;
+        }
         final punchOutTime = (record["punchOutTime"] as Timestamp?)?.toDate();
 
         final exemptionStatus = record["exemptionStatus"] ?? "none";
         final exemptionReason = record["exemptionReason"] ?? "-";
 
-        // Duration in minutes (if punchOut exists)
-        final totalMinutes = (record['totalHours'] ?? 0) as int;
-        final totalHours = (totalMinutes / 60);
+        final totalMinutes =
+            AttendanceUtils.parseStoredMinutes(record['totalHours']) ?? 0;
+        final totalHours = AttendanceUtils.toDecimalHours(totalMinutes);
 
         // Exempt status text
         String exemptText;
@@ -513,12 +621,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
       // Leave rows
       for (var leave in leaves) {
-        final employee = employees.firstWhere(
-              (e) => e["uid"] == leave["userId"],
-          orElse: () => {"name": "Unknown"},
-        );
+        final employee = _lookupEmployee(leave['userId']?.toString() ?? '');
 
         final start = (leave["startDate"] as Timestamp).toDate();
+        if (!isEmployeeVisibleOnDate(employee, start)) {
+          continue;
+        }
         final end = (leave["endDate"] as Timestamp).toDate();
 
         final sameDay = DateUtils.isSameDay(start, end);
@@ -572,6 +680,31 @@ class _AdminDashboardState extends State<AdminDashboard> {
         ]);
       }
 
+      if (startDate != null && endDate != null) {
+        sheet.appendRow([]);
+        final totalWorkedHours = calculateWorkedHoursTextInRange(
+          rangeStart: startDate!,
+          rangeEnd: endDate!,
+          attendanceRecords: attendance,
+          leaveRecords: leaves,
+          holidayDateKeys: holidayDateKeys,
+          employeeLookup: _employeeLookup,
+          userId: selectedEmployee,
+        );
+        final totalLabel = selectedEmployee != null &&
+                selectedEmployee!.isNotEmpty
+            ? '${_lookupEmployee(selectedEmployee!)['name']} - Total Worked Hours'
+            : 'Total Worked Hours';
+        sheet.appendRow([
+          totalLabel,
+          '',
+          '',
+          '',
+          '',
+          totalWorkedHours,
+        ]);
+      }
+
       // Save Excel
       String downloadsPath = "";
       if (Platform.isWindows) {
@@ -616,6 +749,101 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  Widget _buildPendingBadgeButton({
+    required IconData icon,
+    required String tooltip,
+    required Stream<QuerySnapshot> stream,
+    required VoidCallback onPressed,
+  }) {
+    return StreamBuilder<QuerySnapshot>(
+      stream: stream,
+      builder: (context, snapshot) {
+        final count = snapshot.data?.docs.length ?? 0;
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              icon: Icon(icon),
+              tooltip: tooltip,
+              onPressed: onPressed,
+            ),
+            if (count > 0)
+              Positioned(
+                right: 8,
+                top: 8,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
+                  constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                  child: Text(
+                    count.toString(),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _onAdminMenuSelected(String value) async {
+    switch (value) {
+      case 'logs':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const UserLogsScreen()),
+        );
+        break;
+      case 'holiday':
+        final updated = await showDialog<bool>(
+          context: context,
+          builder: (context) => const HolidayCalendarDialog(),
+        );
+        if (updated == true && mounted) setState(() {});
+        break;
+      case 'employees':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const EmployeeManagementScreen()),
+        );
+        _fetchEmployeeNames();
+        break;
+      case 'leave_balance':
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const LeaveBalanceScreen()),
+        );
+        break;
+    }
+  }
+
+  PopupMenuItem<String> _adminMenuItem({
+    required String value,
+    required IconData icon,
+    required String label,
+  }) {
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(
+        children: [
+          Icon(icon, size: 20),
+          const SizedBox(width: 12),
+          Text(label),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _scrollController.dispose();
@@ -651,38 +879,41 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
               // ✅ ACTION BUTTONS BACK
               actions: [
-
-                /// 📜 View User Logs
-                IconButton(
-                  icon: const Icon(Icons.history),
-                  tooltip: "View User Logs",
+                _buildPendingBadgeButton(
+                  icon: Icons.notifications,
+                  tooltip: 'Leave Requests',
+                  stream: FirebaseFirestore.instance
+                      .collection('leaves')
+                      .where('status', isEqualTo: 'Pending')
+                      .snapshots(),
                   onPressed: () {
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => const UserLogsScreen(),
+                        builder: (_) => const LeaveApprovalScreen(),
                       ),
                     );
                   },
                 ),
-
-                /// 📅 Mark Holiday
-                IconButton(
-                  icon: const Icon(Icons.calendar_month),
-                  tooltip: "Mark Holiday",
-                  onPressed: () async {
-                    final updated = await showDialog<bool>(
-                      context: context,
-                      builder: (context) => const HolidayCalendarDialog(),
+                _buildPendingBadgeButton(
+                  icon: Icons.receipt_long,
+                  tooltip: 'OPE Claims',
+                  stream: FirebaseFirestore.instance
+                      .collection('ope_claims')
+                      .where('status', isEqualTo: 'pending')
+                      .snapshots(),
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const OpeClaimApprovalScreen(),
+                      ),
                     );
-                    if (updated == true) {
-                      setState(() {});
-                    }
                   },
                 ),
                 IconButton(
                   icon: const Icon(Icons.analytics),
-                  tooltip: "Summary",
+                  tooltip: 'Monthly Summary',
                   onPressed: () {
                     Navigator.push(
                       context,
@@ -694,54 +925,43 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     );
                   },
                 ),
-
-                /// 🔔 Leave Requests (With Badge)
-                StreamBuilder<QuerySnapshot>(
-                  stream: FirebaseFirestore.instance
-                      .collection('leaves')
-                      .where('status', isEqualTo: 'Pending')
-                      .snapshots(),
-                  builder: (context, snapshot) {
-                    final count = snapshot.data?.docs.length ?? 0;
-
-                    return Stack(
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.notifications),
-                          tooltip: "View Leave Requests",
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => const LeaveApprovalScreen(),
-                              ),
-                            );
-                          },
-                        ),
-
-                        if (count > 0)
-                          Positioned(
-                            right: 8,
-                            top: 8,
-                            child: Container(
-                              padding: const EdgeInsets.all(4),
-                              decoration: const BoxDecoration(
-                                color: Colors.red,
-                                shape: BoxShape.circle,
-                              ),
-                              child: Text(
-                                count.toString(),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
+                IconButton(
+                  icon: const Icon(Icons.schedule),
+                  tooltip: 'Clock Hours',
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const ClockHoursScreen(),
+                      ),
                     );
                   },
+                ),
+                PopupMenuButton<String>(
+                  tooltip: 'More options',
+                  onSelected: _onAdminMenuSelected,
+                  itemBuilder: (context) => [
+                    _adminMenuItem(
+                      value: 'holiday',
+                      icon: Icons.calendar_month,
+                      label: 'Mark Holiday',
+                    ),
+                    _adminMenuItem(
+                      value: 'employees',
+                      icon: Icons.people,
+                      label: 'Employee Management',
+                    ),
+                    _adminMenuItem(
+                      value: 'leave_balance',
+                      icon: Icons.event_available,
+                      label: 'Leave Balance',
+                    ),
+                    _adminMenuItem(
+                      value: 'logs',
+                      icon: Icons.history,
+                      label: 'User Logs',
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -776,8 +996,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
                               ?.toDate();
                           return punchIn != null && isInDateRange(punchIn);
                         }).toList();
+                        final duplicateAttendanceDayKeys =
+                            findDuplicateAttendanceDayKeys(
+                          dateFilteredAttendance,
+                        );
+                        final duplicateAttendanceLabels =
+                            formatDuplicateAttendanceLabels(
+                          duplicateDayKeys: duplicateAttendanceDayKeys,
+                          employeeLookup: _employeeLookup,
+                        );
                         final totalWorkedHours = calculateTotalHours(
-                            dateFilteredAttendance);
+                          attendance,
+                          leaves,
+                          holidays,
+                        );
 
                         final dateFilteredLeaves = filteredLeaves.where((l) {
                           final start = (l["startDate"] as Timestamp).toDate();
@@ -810,7 +1042,31 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         ];
                         _applySorting(allRecords);
 
-                        final hasRecords = _sortedRecords.isNotEmpty;
+                        final totalRecords = _sortedRecords.length;
+                        final totalPages = totalRecords == 0
+                            ? 1
+                            : ((totalRecords - 1) ~/ _rowsPerPage) + 1;
+                        final safePage =
+                            _tablePage.clamp(0, totalPages - 1);
+                        if (safePage != _tablePage) {
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) setState(() => _tablePage = safePage);
+                          });
+                        }
+                        final pageStart = safePage * _rowsPerPage;
+                        final pageRecords = _sortedRecords
+                            .skip(pageStart)
+                            .take(_rowsPerPage)
+                            .toList();
+
+                        final hasRecords = totalRecords > 0;
+                        final duplicateSummaryText =
+                            duplicateAttendanceLabels.isEmpty
+                                ? null
+                                : duplicateAttendanceLabels.length <= 2
+                                    ? duplicateAttendanceLabels.join(', ')
+                                    : '${duplicateAttendanceLabels.take(2).join(', ')} '
+                                        '+${duplicateAttendanceLabels.length - 2} more';
 
                         return Column(
                           children: [
@@ -897,7 +1153,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
                             Container(
                               width: double.infinity,
-                              padding: const EdgeInsets.all(14),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 10,
+                              ),
                               margin: const EdgeInsets.only(bottom: 12),
                               decoration: BoxDecoration(
                                 color: Colors.amberAccent.shade100,
@@ -905,27 +1164,66 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                 border: BoxBorder.all(color: Colors.black45),
                               ),
                               child: Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
-                                  Text(
-                                    selectedEmployee == null
-                                        ? "All Employees"
-                                        : employees
-                                        .firstWhere(
-                                          (e) => e["uid"] == selectedEmployee,
-                                      orElse: () => {"name": "Unknown"},
-                                    )["name"] ??
-                                        "Unknown",
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
+                                  Expanded(
+                                    flex: 2,
+                                    child: Text(
+                                      selectedEmployee == null
+                                          ? "All Employees"
+                                          : _lookupEmployee(
+                                              selectedEmployee!,
+                                            )['name'] ??
+                                              "Unknown",
+                                      style: const TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
                                     ),
                                   ),
-
+                                  if (duplicateSummaryText != null) ...[
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      flex: 3,
+                                      child: Tooltip(
+                                        message: duplicateAttendanceLabels
+                                            .join('\n'),
+                                        waitDuration:
+                                            const Duration(milliseconds: 400),
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              Icons.content_copy,
+                                              size: 16,
+                                              color: Colors.deepOrange.shade800,
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Expanded(
+                                              child: Text(
+                                                'Duplicate: '
+                                                '${duplicateAttendanceDayKeys.length} '
+                                                '— $duplicateSummaryText',
+                                                style: TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w600,
+                                                  color: Colors
+                                                      .deepOrange.shade900,
+                                                ),
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  const SizedBox(width: 12),
                                   Text(
-                                    "Total Hours: $totalWorkedHours hrs",
+                                    'Total Hours: $totalWorkedHours',
                                     style: const TextStyle(
-                                      fontSize: 18,
+                                      fontSize: 16,
                                       fontWeight: FontWeight.bold,
                                       color: Colors.black,
                                     ),
@@ -938,21 +1236,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             Row(
                               children: [
                                 Expanded(
-                                  child: DropdownButtonFormField<String>(
-                                    isExpanded: true,
-                                    hint: const Text("Select Employee"),
+                                  child: SearchableEmployeeDropdown(
                                     value: selectedEmployee,
-                                    items: employees
-                                        .map(
-                                          (e) =>
-                                          DropdownMenuItem<String>(
-                                            value: e["uid"],
-                                            child: Text(e["name"]),
-                                          ),
-                                    )
-                                        .toList(),
+                                    employees: employeeListToNameMap(employees),
+                                    showClearOption: true,
+                                    clearOptionLabel: 'All Employees',
                                     onChanged: (value) {
-                                      setState(() => selectedEmployee = value);
+                                      setState(() {
+                                        selectedEmployee = value;
+                                        _tablePage = 0;
+                                      });
                                     },
                                   ),
                                 ),
@@ -986,6 +1279,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                         today.day,
                                       );
                                       endDate = startDate;
+                                      _tablePage = 0;
                                     });
                                   },
                                 ),
@@ -1006,7 +1300,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 20),
+                            const SizedBox(height: 12),
 
                             // 🔹 Data Section
                             Expanded(
@@ -1038,9 +1332,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                             (d) {
                                           if (d["type"] != "attendance")
                                             return "";
-                                          final employee = employees.firstWhere(
-                                                (e) => e["uid"] == d["userId"],
-                                            orElse: () => {"name": ""},
+                                          final employee = _lookupEmployee(
+                                            d['userId']?.toString() ?? '',
                                           );
                                           return employee["name"];
                                         },
@@ -1149,19 +1442,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                       softWrap: true,
                                     ),
                                   ),
+                                  const DataColumn2(label: Text("Actions")),
                                 ],
-                                rows: _sortedRecords.map((data) {
+                                rows: pageRecords.map((data) {
                                   final type = data["type"];
                                   final isLeave = type == "leave";
                                   final isHoliday = type == "holiday";
-
-                                  final employee = employees.firstWhere(
-                                        (e) => e["uid"] == data["userId"],
-                                    orElse: () =>
-                                    {
-                                      "uid": "",
-                                      "name": "Unknown",
-                                    },
+                                  final employee = _lookupEmployee(
+                                    data['userId']?.toString() ?? '',
                                   );
 
                                   final punchInTime =
@@ -1176,34 +1464,32 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                         ? punchOutTime.difference(punchInTime)
                                         : null;*/
 
-                                  final exemptionStatus =
-                                      data['exemptionStatus'] ?? "none";
                                   bool isHalfDay = false;
                                   String totalHoursText = "-";
 
                                   if (!isLeave &&
                                       !isHoliday) {
                                     if (punchOutTime == null) {
-                                      // ❗ User did NOT punch out
                                       totalHoursText = "-";
-                                    }
-                                    else {
-                                      // Use totalMinutes from DB
-                                      final totalMinutes = data['totalHours'] ??
-                                          0; // totalHours stored in minutes
-                                      final hours = totalMinutes ~/ 60;
-                                      final minutes = totalMinutes % 60;
+                                    } else {
+                                      final totalMinutes =
+                                          AttendanceUtils.parseStoredMinutes(
+                                                data['totalHours'],
+                                              ) ??
+                                              0;
+                                      totalHoursText =
+                                          AttendanceUtils.formatMinutes(
+                                        totalMinutes,
+                                      );
 
-                                      if (hours < 9 &&
-                                          exemptionStatus != "approved") {
+                                      if (totalMinutes <
+                                              AttendanceUtils.fullDayMinutes &&
+                                          !AttendanceUtils.isExemptionApproved(
+                                            data,
+                                          )) {
                                         isHalfDay = true;
                                         totalHoursText =
-                                        "$hours h ${minutes.toString().padLeft(
-                                            2, '0')} m (Half Day)";
-                                      } else {
-                                        totalHoursText =
-                                        "$hours h ${minutes.toString().padLeft(
-                                            2, '0')} m";
+                                            "$totalHoursText (Half Day)";
                                       }
                                     }
                                   } else if (isLeave) {
@@ -1213,10 +1499,33 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                   }
 
 
+                                  final isDuplicate =
+                                      !isLeave &&
+                                      !isHoliday &&
+                                      isDuplicateAttendanceEntry(
+                                        data,
+                                        duplicateAttendanceDayKeys,
+                                      );
+
+                                  final punchDay =
+                                      AttendanceUtils.parseRecordDate(data);
+                                  final isOffSatWork = !isLeave &&
+                                      !isHoliday &&
+                                      punchDay != null &&
+                                      isScheduledOffSaturday(
+                                        employee,
+                                        punchDay,
+                                      ) &&
+                                      punchOutTime != null;
+
                                   final rowColor = isHoliday
                                       ? Colors.green[200]
                                       : isLeave
                                       ? Colors.yellow[200]
+                                      : isDuplicate
+                                      ? Colors.deepOrange.shade200
+                                      : isOffSatWork
+                                      ? Colors.teal.shade100
                                       : null;
 
                                   return DataRow(
@@ -1235,6 +1544,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                               ? "Holiday"
                                               : isLeave
                                               ? "Leave"
+                                              : isDuplicate
+                                              ? "Attendance (Duplicate)"
+                                              : isOffSatWork
+                                              ? "Attendance (Off Sat)"
                                               : "Attendance",
                                         ),
                                       ),
@@ -1252,6 +1565,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                                 "",
                                             width: 50,
                                             height: 50,
+                                            cacheWidth: 100,
+                                            cacheHeight: 100,
                                             fit: BoxFit.cover,
                                             errorBuilder:
                                                 (_,
@@ -1299,6 +1614,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                                 "",
                                             width: 50,
                                             height: 50,
+                                            cacheWidth: 100,
+                                            cacheHeight: 100,
                                             fit: BoxFit.cover,
                                             errorBuilder:
                                                 (_,
@@ -1592,6 +1909,21 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                         ),
                                       ),
 
+                                      DataCell(
+                                        isDuplicate && !isLeave && !isHoliday
+                                            ? IconButton(
+                                                icon: Icon(
+                                                  Icons.delete_outline,
+                                                  color: Colors.red.shade700,
+                                                ),
+                                                tooltip: 'Delete this duplicate entry',
+                                                onPressed: () =>
+                                                    _confirmDeleteAttendance(
+                                                      data,
+                                                    ),
+                                              )
+                                            : const SizedBox.shrink(),
+                                      ),
 
                                     ],
                                   );
@@ -1599,6 +1931,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
                               ),
                             ),
+                            if (hasRecords && totalRecords > _rowsPerPage)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    IconButton(
+                                      tooltip: 'Previous page',
+                                      onPressed: safePage > 0
+                                          ? () => setState(() => _tablePage--)
+                                          : null,
+                                      icon: const Icon(Icons.chevron_left),
+                                    ),
+                                    Text(
+                                      'Showing ${pageStart + 1}-'
+                                      '${pageStart + pageRecords.length} of '
+                                      '$totalRecords  •  Page ${safePage + 1} '
+                                      'of $totalPages',
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    IconButton(
+                                      tooltip: 'Next page',
+                                      onPressed: safePage < totalPages - 1
+                                          ? () => setState(() => _tablePage++)
+                                          : null,
+                                      icon: const Icon(Icons.chevron_right),
+                                    ),
+                                  ],
+                                ),
+                              ),
                           ],
                         );
                       }
